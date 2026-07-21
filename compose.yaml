@@ -1,0 +1,31 @@
+services:
+  grok-reg:
+    image: grok-reg:local
+    build:
+      context: .
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined
+    ports:
+      - "${GROK_REG_BIND_HOST:-127.0.0.1}:${GROK_REG_HOST_PORT:-5000}:5000"
+    env_file:
+      - .env
+    environment:
+      GROK_REG_WEB_HOST: 0.0.0.0
+      GROK_REG_WEB_PORT: 5000
+      GROK_REG_WEB_TOKEN: ${GROK_REG_WEB_TOKEN:?set GROK_REG_WEB_TOKEN in .env}
+      GROK_REG_FLASK_SECRET: ${GROK_REG_FLASK_SECRET:?set GROK_REG_FLASK_SECRET in .env}
+      GROK_REG_DATA_DIR: /data
+      DISPLAY: :99
+      TZ: ${TZ:-Asia/Shanghai}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    shm_size: 1gb
+    volumes:
+      - grok-reg-data:/data
+
+volumes:
+  grok-reg-data:

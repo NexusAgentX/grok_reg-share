@@ -32,7 +32,10 @@ def _source(filename: str) -> str:
 
 
 def _config() -> dict:
-    return json.loads(_source("config.json"))
+    path = ROOT / "config.json"
+    if not path.is_file():
+        path = ROOT / "config.example.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 # ── 1. proxy → local proxy :7890 ──
@@ -103,9 +106,10 @@ def check_nsfw() -> bool:
 
 @check("gc-tab-restart")
 def check_gc_tab() -> bool:
-    """每200账号 browser 重启（_gc_counter + _maybe_gc_restart）"""
+    """浏览器按配置的处理次数完整回收。"""
+    reg = _source("grok_register_ttk.py")
     cli = _source("register_cli.py")
-    return "_gc_counter" in cli and "_maybe_gc_restart" in cli
+    return "browser_recycle_every" in reg and "--browser-recycle-every" in cli
 
 
 # ── 8. CDP 指纹随机（暂缓，Turnstile 已过） ──
@@ -152,7 +156,7 @@ def check_error_isolation() -> bool:
     """账号级重试（retry loop + inc_fail 统计）"""
     src = _source("register_cli.py")
     has_retry = "retry" in src.lower()
-    has_fail_track = "inc_fail" in src
+    has_fail_track = '_inc("reg_fail")' in src
     return has_retry and has_fail_track
 
 

@@ -12,7 +12,9 @@ config.json.bak*
 .env
 accounts_*.txt
 emails_used.txt
+emails_error.txt
 mail_credentials.txt
+browser-data/
 cpa_auths/
 cookies/
 screenshots/

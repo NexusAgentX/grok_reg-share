@@ -53,7 +53,8 @@ def _project_root() -> Path:
 
 
 def _debug_shot_dir() -> Path:
-    d = _project_root() / "screenshots"
+    data_dir = Path(os.environ.get("GROK_REG_DATA_DIR", _project_root())).expanduser().resolve()
+    d = data_dir / "screenshots"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -115,12 +116,17 @@ def _save_debug_shot(
                 pass
             log(f"screenshot failed tag={tag}")
             return None
+        try:
+            os.chmod(saved, 0o600)
+        except OSError:
+            pass
         # also dump short text/url alongside
         try:
             meta = path.with_suffix(".txt")
             url = _page_url(page)
             vis = _norm(_visible_text(page))[:800]
             meta.write_text(f"url={url}\nemail={email}\ntag={tag}\nvisible={vis}\n", encoding="utf-8")
+            os.chmod(meta, 0o600)
         except Exception:
             pass
         log(f"debug shot saved: {saved}")
@@ -187,7 +193,6 @@ def create_standalone_page(
         opts.set_timeouts(base=2)
         for flag in (
             "--disable-gpu",
-            "--no-sandbox",
             "--disable-dev-shm-usage",
             "--mute-audio",
             "--no-first-run",
@@ -195,6 +200,8 @@ def create_standalone_page(
             "--window-size=1280,900",
         ):
             opts.set_argument(flag)
+        if os.environ.get("CHROMIUM_NO_SANDBOX") == "1":
+            opts.set_argument("--no-sandbox")
         ext = str(_pkg_root / "turnstilePatch")
         if os.path.isdir(ext):
             try:

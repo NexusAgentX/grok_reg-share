@@ -81,6 +81,8 @@ tr:last-child td{border-bottom:none}
 .badge-yellow{background:rgba(245,158,11,0.15);color:var(--yellow);animation:pulse 1s infinite}
 .copy-btn{cursor:pointer;color:var(--accent-hover);margin-left:6px;display:inline-flex;align-items:center}
 .copy-btn:hover{color:#fff}
+.secret-state{font-family:var(--mono);color:var(--muted)}
+.secret-state button{margin-left:8px}
 .probe-res{font-size:11px;margin-top:4px;font-family:var(--mono)}
 .probe-res.ok{color:var(--green)}
 .probe-res.err{color:var(--red)}
@@ -110,9 +112,28 @@ tr:last-child td{border-bottom:none}
 .toast.show{opacity:1;transform:translateY(0)}
 
 @media(max-width:960px){
-.grid-main{grid-template-columns:1fr}
-.config-grid{grid-template-columns:1fr}
-.config-section-title{grid-column: span 1}
+.grid-main{grid-template-columns:minmax(0,1fr)}
+.grid-main>*{min-width:0}
+.content-area,.sidebar-panel,.tab-content,.config-panel,.config-grid{min-width:0;max-width:100%}
+.config-grid{grid-template-columns:minmax(0,1fr)}
+.config-section-title{grid-column:span 1}
+.tabs{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.tab{flex:0 0 auto}
+.custom-key-row{flex-direction:column;align-items:stretch}
+.custom-key-row input{width:100%!important;min-width:0}
+.config-actions{flex-wrap:wrap}
+}
+@media(max-width:600px){
+.app{padding:16px}
+header{gap:12px;margin-bottom:20px}
+header h1{font-size:20px}
+header .status-wrapper{gap:8px;font-size:12px;white-space:nowrap}
+.stats-row{gap:12px;margin-bottom:20px}
+.stat-card{padding:16px}
+.grid-main{gap:16px}
+.sidebar-panel{padding:16px}
+.tab{padding:12px 16px}
+.tab-content{padding:16px}
 }
 </style>
 </head>
@@ -145,6 +166,14 @@ tr:last-child td{border-bottom:none}
         <div class="field">
           <label>并发线程数</label>
           <input type="number" id="inputThreads" value="1" min="1" max="10">
+        </div>
+        <div class="field">
+          <label>注册模式</label>
+          <select id="inputRegistrationMode">
+            <option value="browser">稳定浏览器</option>
+            <option value="fast">快速协议</option>
+            <option value="auto">快速并自动回退</option>
+          </select>
         </div>
         <div style="margin-top: 8px;">
           <button class="btn-primary" id="btnStart" onclick="startReg()" style="width: 100%;">启动批量注册</button>
@@ -270,7 +299,12 @@ function toast(msg) {
 
 // Escaping
 function escHtml(s) {
-  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s || '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 // Copy helper
@@ -374,14 +408,25 @@ function clearLogPanel() {
 }
 
 // Start / Stop
+function syncRegistrationModeLimit() {
+  const mode = $('#inputRegistrationMode').value;
+  const threads = $('#inputThreads');
+  const max = mode === 'browser' ? 10 : 4;
+  threads.max = String(max);
+  if (Number(threads.value) > max) threads.value = String(max);
+}
+$('#inputRegistrationMode').addEventListener('change', syncRegistrationModeLimit);
+syncRegistrationModeLimit();
+
 async function startReg() {
   const extra = parseInt($('#inputExtra').value) || 1;
   const threads = parseInt($('#inputThreads').value) || 1;
+  const registration_mode = $('#inputRegistrationMode').value || 'browser';
   try {
     const r = await fetch('/api/start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({extra, threads})
+      body: JSON.stringify({extra, threads, registration_mode})
     });
     const d = await r.json();
     if (d.ok) { toast('注册任务已启动'); pollStatus(); }
@@ -400,169 +445,163 @@ async function stopReg() {
 
 // Accounts Management
 let localAccountsList = [];
+
+function cell(text, className = '') {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (className) td.className = className;
+  return td;
+}
+
+function button(label, className, handler) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = className;
+  btn.textContent = label;
+  btn.addEventListener('click', () => handler(btn));
+  return btn;
+}
+
+async function copyAccountSecret(accountId, kind, message) {
+  try {
+    const r = await fetch(`/api/accounts/${accountId}/secret/${kind}`, {method: 'POST'});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || '读取失败');
+    copyToClipboard(d.value || '', message);
+  } catch (e) {
+    toast(e.message || '读取凭证失败');
+  }
+}
+
 async function loadAccounts() {
   try {
     const r = await fetch('/api/accounts');
     localAccountsList = await r.json();
     const body = $('#accountsBody');
-    body.innerHTML = '';
+    body.replaceChildren();
     if (localAccountsList.length === 0) {
-      body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:40px">暂无账号数据</td></tr>';
+      const tr = document.createElement('tr');
+      const td = cell('暂无账号数据');
+      td.colSpan = 6;
+      td.style.cssText = 'text-align:center;color:var(--muted);padding:40px';
+      tr.appendChild(td);
+      body.appendChild(tr);
       return;
     }
+
     for (const a of localAccountsList) {
       const tr = document.createElement('tr');
       tr.id = `row-acc-${a.id}`;
-      
-      const pwdDisplay = a.password.length > 3 ? a.password.slice(0,3) + '***' : '***';
-      const ssoDisplay = a.sso.length > 20 ? a.sso.slice(0,20) + '...' : a.sso;
-      
-      let cpaBadge = '';
-      if (a.is_minting) {
-        cpaBadge = '<span class="badge badge-yellow">补签中</span>';
-      } else if (a.has_cpa) {
-        cpaBadge = '<span class="badge badge-green">已生成</span>';
-      } else {
-        cpaBadge = '<span class="badge badge-gray">缺失</span>';
-      }
-      
-      let actHtml = '';
+      tr.appendChild(cell(String(a.id)));
+      tr.appendChild(cell(a.email));
+
+      const pwdCell = cell(a.has_password ? '已保存' : '缺失', 'secret-state');
+      if (a.has_password) pwdCell.appendChild(button('复制', 'btn-secondary btn-sm', () => copyAccountSecret(a.id, 'password', '密码已复制')));
+      tr.appendChild(pwdCell);
+
+      const ssoCell = cell(a.has_sso ? '已保存' : '缺失', 'secret-state');
+      if (a.has_sso) ssoCell.appendChild(button('复制', 'btn-secondary btn-sm', () => copyAccountSecret(a.id, 'sso', 'SSO Cookie 已复制')));
+      tr.appendChild(ssoCell);
+
+      const cpaCell = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = `badge ${a.is_minting ? 'badge-yellow' : a.has_cpa ? 'badge-green' : 'badge-gray'}`;
+      badge.textContent = a.is_minting ? '补签中' : a.has_cpa ? '已生成' : '缺失';
+      cpaCell.appendChild(badge);
+      const probeResult = document.createElement('div');
+      probeResult.id = `probe-res-${a.id}`;
+      probeResult.className = 'probe-res';
+      cpaCell.appendChild(probeResult);
+      tr.appendChild(cpaCell);
+
+      const actions = document.createElement('td');
+      actions.style.cssText = 'text-align:center;display:flex;gap:6px;justify-content:center;align-items:center;min-height:48px';
       if (a.has_cpa) {
-        actHtml = `
-          <button class="btn-secondary btn-sm" onclick="probeCPA('${a.email}', this)">探针测试</button>
-          <button class="btn-secondary btn-sm" onclick="copyToClipboard('${escJsString(a.cpa_raw)}', 'CPA OIDC JSON 已复制')">复制 OIDC</button>
-        `;
+        actions.appendChild(button('探针测试', 'btn-secondary btn-sm', btn => probeCPA(a, btn)));
+        actions.appendChild(button('复制 OIDC', 'btn-secondary btn-sm', () => copyAccountSecret(a.id, 'cpa', 'CPA OIDC JSON 已复制')));
       } else {
-        actHtml = `
-          <button class="btn-primary btn-sm" onclick="mintSingleCPA('${a.email}', '${a.password}', '${a.sso}', this)" ${a.is_minting ? 'disabled' : ''}>补签 CPA</button>
-        `;
+        const mintButton = button('补签 CPA', 'btn-primary btn-sm', btn => mintSingleCPA(a, btn));
+        mintButton.disabled = a.is_minting;
+        actions.appendChild(mintButton);
       }
-      
-      tr.innerHTML = `
-        <td>${a.id}</td>
-        <td>${escHtml(a.email)}</td>
-        <td style="font-family:var(--mono)">
-          <span>${escHtml(pwdDisplay)}</span>
-          <span class="copy-btn" onclick="copyToClipboard('${escJsString(a.password)}', '密码已复制')" title="复制原始密码">&#128203;</span>
-        </td>
-        <td style="font-family:var(--mono);font-size:11px">
-          <span>${escHtml(ssoDisplay)}</span>
-          <span class="copy-btn" onclick="copyToClipboard('${escJsString(a.sso)}', 'SSO Cookie 已复制')" title="复制完整SSO">&#128203;</span>
-        </td>
-        <td>
-          <div id="cpa-badge-${a.id}">${cpaBadge}</div>
-          <div id="probe-res-${a.id}" class="probe-res"></div>
-        </td>
-        <td style="text-align: center; display: flex; gap: 6px; justify-content: center; align-items: center; min-height: 48px;">
-          ${actHtml}
-        </td>
-      `;
+      tr.appendChild(actions);
       body.appendChild(tr);
     }
-  } catch(e) {}
-}
-
-function escJsString(s) {
-  return (s || '').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n');
-}
-
-// Mint single account CPA
-async function mintSingleCPA(email, password, sso, btn) {
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '拉起中...';
+  } catch (e) {
+    toast('加载账号失败');
   }
-  toast(`正在为 ${email} 异步拉起补签程序...`);
+}
+
+async function mintSingleCPA(account, btn) {
+  btn.disabled = true;
+  btn.textContent = '拉起中...';
+  toast(`正在为 ${account.email} 异步拉起补签程序...`);
   try {
     const r = await fetch('/api/cpa/mint_single', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({email, password, sso})
+      body: JSON.stringify({account_id: account.id})
     });
     const d = await r.json();
-    if (d.ok) {
-      toast('补签任务拉起成功，请关注日志和浏览器确认。');
-      loadAccounts();
-    } else {
-      toast(d.error || '补签启动失败');
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = '补签 CPA';
-      }
-    }
-  } catch(e) {
-    toast('网络请求失败');
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '补签 CPA';
-    }
+    if (!r.ok || !d.ok) throw new Error(d.error || '补签启动失败');
+    toast('补签任务拉起成功，请关注日志和浏览器确认。');
+    loadAccounts();
+  } catch (e) {
+    toast(e.message || '网络请求失败');
+    btn.disabled = false;
+    btn.textContent = '补签 CPA';
   }
 }
 
-// Batch backfill missing
 async function backfillAllMissingCPA() {
   const missing = localAccountsList.filter(a => !a.has_cpa && !a.is_minting);
   if (missing.length === 0) {
     toast('没有需要补全CPA凭证的账号');
     return;
   }
-  toast(`准备批量补签 ${missing.length} 个账号...`);
-  
   for (const acc of missing) {
     try {
       await fetch('/api/cpa/mint_single', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({email: acc.email, password: acc.password, sso: acc.sso})
+        body: JSON.stringify({account_id: acc.id})
       });
-      toast(`已排队补签: ${acc.email}`);
-      await new Promise(r => setTimeout(r, 1500));
-    } catch(e) {}
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    } catch (e) {}
   }
+  toast(`已提交 ${missing.length} 个补签任务`);
   loadAccounts();
 }
 
-// Probe CPA file
-async function probeCPA(email, btn) {
-  const acc = localAccountsList.find(a => a.email === email);
-  if (!acc) return;
-  const resEl = $(`#probe-res-${acc.id}`);
+async function probeCPA(account, btn) {
+  const resEl = $(`#probe-res-${account.id}`);
   resEl.className = 'probe-res';
   resEl.textContent = '正在发起探针...';
-  
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '检测中...';
-  }
-  
+  btn.disabled = true;
+  btn.textContent = '检测中...';
+
   try {
     const r = await fetch('/api/cpa/probe', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({email})
+      body: JSON.stringify({account_id: account.id})
     });
     const d = await r.json();
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '探针测试';
-    }
-    
     if (d.ok) {
       resEl.className = 'probe-res ok';
-      resEl.innerHTML = `&#9989; 正常 (grok-4.5) <span style="color:var(--muted); font-size:10px">${d.elapsed}s</span>`;
-      toast(`${email} 探针检测成功，支持 Grok 4.5`);
+      resEl.textContent = `正常 (grok-4.5) ${d.elapsed}s`;
+      toast(`${account.email} 探针检测成功，支持 Grok 4.5`);
     } else {
       resEl.className = 'probe-res err';
-      resEl.textContent = '❌ ' + (d.error || '无 grok-4.5 可用');
-      toast(`${email} 探针检测不可用`);
+      resEl.textContent = d.error || '无 grok-4.5 可用';
+      toast(`${account.email} 探针检测不可用`);
     }
-  } catch(e) {
+  } catch (e) {
     resEl.className = 'probe-res err';
-    resEl.textContent = '❌ 探针请求异常';
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '探针测试';
-    }
+    resEl.textContent = '探针请求异常';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '探针测试';
   }
 }
 
@@ -615,6 +654,11 @@ const CONFIG_SECTIONS = {
     "cloudflare_path_domains", "cloudflare_path_accounts", "cloudflare_path_token", "cloudflare_path_messages",
     "duckmail_api_key", "yyds_api_key", "yyds_jwt"
   ],
+  "快速协议注册": [
+    "registration_mode", "fast_mail_provider", "moemail_api_base", "moemail_api_key",
+    "moemail_cookie", "moemail_domain", "moemail_expiry_time",
+    "fast_token_headless", "fast_token_timeout"
+  ],
   "网络与浏览器": [
     "proxy", "cpa_proxy", "user_agent", "enable_nsfw"
   ],
@@ -631,7 +675,7 @@ const CONFIG_SECTIONS = {
     "mail_timeout", "mail_poll_interval", "mail_retry_count", "code_form_timeout",
     "profile_timeout", "turnstile_retry_limit", "turnstile_stuck_timeout",
     "sso_timeout_base", "sso_timeout_max", "sso_progress_extension",
-    "sso_cookie_read_timeout", "email_submit_confirm_timeout", "show_tutorial_on_start"
+    "email_submit_confirm_timeout", "show_tutorial_on_start"
   ],
   "grok2api 同步": [
     "grok2api_auto_add_local", "grok2api_local_token_file", "grok2api_auto_add_remote",
@@ -657,6 +701,15 @@ const CONFIG_LABELS = {
   "duckmail_api_key": "DuckMail API 密钥",
   "yyds_api_key": "YYDS API 密钥",
   "yyds_jwt": "YYDS JWT 凭证",
+  "registration_mode": "默认注册模式",
+  "fast_mail_provider": "快速模式邮箱服务商",
+  "moemail_api_base": "MoeMail 接口地址",
+  "moemail_api_key": "MoeMail API 密钥",
+  "moemail_cookie": "MoeMail 登录 Cookie",
+  "moemail_domain": "MoeMail 邮箱域名",
+  "moemail_expiry_time": "MoeMail 邮箱有效期（毫秒）",
+  "fast_token_headless": "快速采集浏览器无头模式",
+  "fast_token_timeout": "快速令牌采集超时（秒）",
   "proxy": "注册主代理（可留空）",
   "cpa_proxy": "CPA/OIDC 专用代理（可留空）",
   "user_agent": "浏览器 User-Agent",
@@ -686,7 +739,7 @@ const CONFIG_LABELS = {
   "email_form_timeout": "邮箱表单可见超时（秒）",
   "mail_timeout": "收验证码总超时（秒）",
   "mail_poll_interval": "邮件轮询间隔（秒）",
-  "mail_retry_count": "邮件 API 失败重试次数",
+  "mail_retry_count": "邮箱与验证码阶段重试次数",
   "code_form_timeout": "验证码表单超时（秒）",
   "profile_timeout": "资料页超时（秒）",
   "turnstile_retry_limit": "Turnstile 重试次数",
@@ -694,7 +747,6 @@ const CONFIG_LABELS = {
   "sso_timeout_base": "等待 SSO 最短时间（秒）",
   "sso_timeout_max": "等待 SSO 最长时间（秒）",
   "sso_progress_extension": "SSO 有进度时延长（秒）",
-  "sso_cookie_read_timeout": "读取 Cookie 超时（秒）",
   "email_submit_confirm_timeout": "提交邮箱后跳转确认超时（秒）",
   "grok2api_auto_add_local": "写入本地 grok2api Token 文件",
   "grok2api_local_token_file": "本地 Token 文件路径",
@@ -820,50 +872,71 @@ function createFieldMarkup(key, val, container) {
   div.className = 'config-field';
   div.dataset.fieldKey = key;
 
-  const labelText = CONFIG_LABELS[key] || key;
-  const safeVal = (val === null || typeof val === 'undefined') ? '' : val;
+  const label = document.createElement('label');
+  label.textContent = CONFIG_LABELS[key] || key;
+  div.appendChild(label);
 
-  if (key === 'email_provider') {
-    const v = String(safeVal || 'cloudmail');
-    div.innerHTML = `
-      <label>${labelText}</label>
-      <select data-key="${key}">
-        <option value="cloudmail" ${v === 'cloudmail' ? 'selected' : ''}>CloudMail 自建邮箱</option>
-        <option value="cloudflare" ${v === 'cloudflare' ? 'selected' : ''}>Cloudflare Worker 临时邮箱</option>
-        <option value="duckmail" ${v === 'duckmail' ? 'selected' : ''}>DuckMail</option>
-        <option value="yyds" ${v === 'yyds' ? 'selected' : ''}>YYDS 邮箱</option>
-      </select>
-    `;
+  const safeVal = (val === null || typeof val === 'undefined') ? '' : val;
+  let control;
+
+  if (key === 'registration_mode') {
+    control = document.createElement('select');
+    for (const [value, text] of [
+      ['browser', '稳定浏览器'],
+      ['fast', '快速协议'],
+      ['auto', '快速并自动回退']
+    ]) {
+      control.add(new Option(text, value));
+    }
+    control.value = String(safeVal || 'browser');
+  } else if (key === 'fast_mail_provider') {
+    control = document.createElement('select');
+    control.add(new Option('MoeMail', 'moemail'));
+    control.value = 'moemail';
+  } else if (key === 'email_provider') {
+    control = document.createElement('select');
+    for (const [value, text] of [
+      ['cloudmail', 'CloudMail 自建邮箱'],
+      ['cloudflare', 'Cloudflare Worker 临时邮箱'],
+      ['duckmail', 'DuckMail'],
+      ['yyds', 'YYDS 邮箱']
+    ]) {
+      control.add(new Option(text, value));
+    }
+    control.value = String(safeVal || 'cloudmail');
   } else if (key === 'cloudflare_auth_mode') {
-    const v = String(safeVal || 'none');
-    div.innerHTML = `
-      <label>${labelText}</label>
-      <select data-key="${key}">
-        <option value="none" ${v === 'none' ? 'selected' : ''}>无认证</option>
-        <option value="bearer" ${v === 'bearer' ? 'selected' : ''}>Bearer Token</option>
-        <option value="header" ${v === 'header' ? 'selected' : ''}>自定义 Header</option>
-      </select>
-    `;
+    control = document.createElement('select');
+    for (const [value, text] of [['none', '无认证'], ['bearer', 'Bearer Token'], ['x-api-key', 'X-API-Key'], ['query-key', 'Query Key']]) {
+      control.add(new Option(text, value));
+    }
+    control.value = String(safeVal || 'none');
   } else if (typeof safeVal === 'boolean') {
-    div.innerHTML = `
-      <label>${labelText}</label>
-      <select data-key="${key}" data-type="boolean">
-        <option value="true" ${safeVal ? 'selected' : ''}>开启</option>
-        <option value="false" ${!safeVal ? 'selected' : ''}>关闭</option>
-      </select>
-    `;
-  } else if (typeof safeVal === 'number') {
-    div.innerHTML = `
-      <label>${labelText}</label>
-      <input data-key="${key}" data-type="number" type="number" step="any" value="${escHtml(String(safeVal))}" />
-    `;
+    control = document.createElement('select');
+    control.dataset.type = 'boolean';
+    control.add(new Option('开启', 'true'));
+    control.add(new Option('关闭', 'false'));
+    control.value = safeVal ? 'true' : 'false';
   } else {
-    const isSecret = /password|api_key|jwt|app_key/i.test(key);
-    div.innerHTML = `
-      <label>${labelText}</label>
-      <input data-key="${key}" data-type="string" ${isSecret ? 'type="password"' : 'type="text"'} value="${escHtml(String(safeVal))}" placeholder="${isSecret ? '请输入密钥' : ''}" />
-    `;
+    control = document.createElement('input');
+    if (typeof safeVal === 'number') {
+      control.type = 'number';
+      control.step = 'any';
+      control.dataset.type = 'number';
+      const allowNegative = key === 'cpa_mint_workers';
+      control.min = allowNegative ? '-1' : '0';
+      if (key === 'register_threads' || key === 'cpa_mint_workers') control.max = '10';
+      if (key === 'register_count') control.max = '100000';
+    } else {
+      const isSecret = ['proxy', 'cpa_proxy', 'moemail_cookie'].includes(key) || /password|api[_-]?key|jwt|app[_-]?key|secret/i.test(key);
+      control.type = isSecret ? 'password' : 'text';
+      control.dataset.type = 'string';
+      if (isSecret) control.placeholder = '输入新值可覆盖已保存密钥';
+    }
+    control.value = String(safeVal);
   }
+
+  control.dataset.key = key;
+  div.appendChild(control);
   container.appendChild(div);
 }
 

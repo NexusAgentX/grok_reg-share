@@ -1,6 +1,6 @@
 # Grok 注册机（grok_reg）
 
-基于 **Chromium + DrissionPage + turnstilePatch** 的免费 Grok 账号注册机。
+基于 **Chromium + DrissionPage + turnstilePatch** 的 Grok 账号注册工具，支持稳定浏览器注册和可选的浏览器辅助协议注册。
 
 一条成功链路会产出两类凭证：
 
@@ -47,9 +47,10 @@
 | 依赖 | 说明 |
 |------|------|
 | Linux + 桌面 `DISPLAY` | OIDC 确认默认**有头**浏览器；纯 headless 易被 Cloudflare 拦 |
-| `mise` + `uv` + Python 3.12/3.13 | 本目录 `mise.toml` / `uv.lock` |
+| `mise` + `uv` + Python 3.13 | 本目录 `mise.toml` / `uv.lock` |
 | `chromium` | DrissionPage 驱动 |
 | 代理 | xAI / accounts.x.ai 通常需要，如 `http://127.0.0.1:7890` |
+| 快速模式邮箱 | MoeMail API key 或登录 Cookie；稳定浏览器模式仍使用主邮箱配置 |
 | 可选 | 本机 grok2api `:8000`、CLIProxyAPI(CPA) `:8317` |
 
 ```bash
@@ -57,7 +58,42 @@ cd /path/to/grok_reg
 mise install
 uv sync
 uv run python -c "from DrissionPage import Chromium; print('OK')"
+uv run python -m unittest discover -s tests -v
 ```
+
+### Web 控制台
+
+```bash
+uv run python web_app.py
+```
+
+服务只监听 `http://127.0.0.1:5000`。启动日志会打印随机登录令牌，也可在启动前通过
+`GROK_REG_WEB_TOKEN` 固定。控制台没有设计成公网服务，勿反向代理或改绑 `0.0.0.0`。
+
+账号列表默认不下发密码、SSO 或 OIDC JSON；只有登录后主动点击复制时，后端才返回单项凭证。
+
+### Docker Compose
+
+镜像内含 Python 3.13、Chromium、中文字体和 Xvfb。浏览器以有头模式运行在容器虚拟显示器中，进程使用非 root 用户；Web 端口默认只绑定宿主 `127.0.0.1`，也可通过 `GROK_REG_BIND_HOST` 精确绑定可信私网地址。
+
+```bash
+cp .env.example .env
+# 为 GROK_REG_WEB_TOKEN 和 GROK_REG_FLASK_SECRET 填入随机值
+chmod 600 .env
+docker compose up -d --build
+docker compose ps
+```
+
+打开 `http://<GROK_REG_BIND_HOST>:5000`，使用 `.env` 中的 `GROK_REG_WEB_TOKEN` 登录。运行数据位于 Docker 命名卷的 `/data`，容器重建后仍保留。不要把绑定地址设为 `0.0.0.0` 或公网网卡地址。
+
+```bash
+docker compose exec grok-reg ls -la /data
+docker compose logs -f grok-reg
+docker compose down                 # 停服务，保留数据
+docker compose down --volumes       # 同时删除账号和凭证数据，谨慎执行
+```
+
+容器访问宿主代理或 grok2api 时，配置地址应使用 `host.docker.internal`，例如 `http://host.docker.internal:7890`，不能使用容器自身的 `127.0.0.1`。Compose 为 Chrome 分配了 1 GiB `/dev/shm`。为允许 Chromium 创建 user namespace，容器放宽 seccomp，同时使用非 root 用户、`cap_drop: ALL` 和 `no-new-privileges` 收紧权限；`chromium_no_sandbox` 应继续保持 `false`。
 
 ---
 
@@ -72,6 +108,23 @@ cp config.example.json config.json
 
 2. **每个字段含义见 `config.example.json` 内注释键**，勿删示例里的 `//_readme` 段。  
    运行时读取的是 `config.json`（可同样使用 `//` 注释键）。
+
+### 注册模式
+
+| `registration_mode` | 行为 | 并发上限 |
+|------|------|------|
+| `browser` | 默认稳定路径，完整 Chromium 注册 | 10 |
+| `fast` | Chromium 采集 Castle/Turnstile，邮箱验证和创建账号走协议 | 4 |
+| `auto` | 先走 `fast`，账号创建前明确失败时回退 `browser` | 4 |
+
+`fast`/`auto` 目前要求 `fast_mail_provider=moemail`，并配置 `moemail_api_key` 或 `moemail_cookie`。快速路径只删除本次创建的临时邮箱；达到 MoeMail 数量上限时直接失败，不会清理已有邮箱。若 `create_user` 已发出但结果不确定，`auto` 会停止该账号而不是回退或重试，避免产生重复或孤儿账号。
+
+Web 控制台可在任务面板逐次选择模式。CLI 可用 `--registration-mode browser|fast|auto` 覆盖配置：
+
+```bash
+uv run python register_cli.py --extra 1 --threads 1 --registration-mode fast
+uv run python register_cli.py --extra 1 --threads 1 --registration-mode auto
+```
 
 ### 代理优先级（重要）
 
@@ -89,7 +142,7 @@ cpa_proxy  >  proxy  >  环境变量 https_proxy/http_proxy
 - 只配 `proxy=http://127.0.0.1:7890` 且 `cpa_proxy` 为空 → mint 也走 7890  
 - 两者都配 → mint 只用 `cpa_proxy`  
 - 以前调试时在 shell 里 `export https_proxy=7890` **不会再压过** config  
-- Chromium `--proxy-server` **不能**带 `user:pass`（账号会剥掉，仅 host:port）；HTTP 库仍可用带认证的 URL  
+- HTTP 库支持带认证的代理 URL。快速模式的短 Chromium 会创建仅存活于该浏览器临时目录的认证扩展，凭证文件为 `0600`，退出后删除；稳定浏览器路径仍建议使用无需浏览器认证的本地代理
 
 ### 与 CPA 相关的关键项（摘要）
 
@@ -270,10 +323,10 @@ grok_reg/
     backfill_cpa_xai_from_accounts.py
     export_cpa_xai_from_grok_auth.py
   config.example.json      # 带 // 注释的字段模板
-  config.json              # 本地实配（勿提交密钥）
-  accounts_cli.txt         # 主账本 email----password----sso
-  cpa_auths/               # 【本地归档】xai-<email>.json
-  cookies/                 # 可选 cookie 快照
+  config.json              # 裸机本地实配；Docker 中为 /data/config.json
+  accounts_cli.txt         # 裸机主账本；Docker 中为 /data/accounts_cli.txt
+  cpa_auths/               # 裸机本地归档；Docker 中为 /data/cpa_auths/
+  cookies/                 # 可选 cookie 快照；Docker 中为 /data/cookies/
   turnstilePatch/          # CF Turnstile 扩展
 ```
 
@@ -281,8 +334,10 @@ grok_reg/
 
 ## 安全
 
-- `config.json`、`accounts_cli.txt`、`cpa_auths/*.json` 含密码与 refresh_token，**权限 600 / 勿提交 git**
-- CPA 热加载目录同样 intermediate 密钥，注意备份与权限
+- `config.json`、`accounts_cli.txt`、`cpa_auths/*.json` 含密码与 refresh_token，程序会按 `0600` 写入；勿提交 git
+- CPA 热加载目录同样包含密钥，注意备份与权限
+- HTTP 代理失败默认终止请求，不会静默直连；仅在明确接受真实出口暴露时开启 `allow_direct_fallback`
+- Chromium 沙箱默认开启；只有受信容器确有需要时才配置 `chromium_no_sandbox=true`
 - 免费 Build 有额度/风控；批量 mint 请控速（`--sleep`）
 
 ---

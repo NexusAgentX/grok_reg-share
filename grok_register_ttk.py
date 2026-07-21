@@ -25,7 +25,9 @@ from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
 
 
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.abspath(os.path.expanduser(os.environ.get("GROK_REG_DATA_DIR", PROJECT_DIR)))
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "duckmail_api_key": "",
@@ -37,6 +39,8 @@ DEFAULT_CONFIG = {
     "cloudflare_path_token": "/token",
     "cloudflare_path_messages": "/messages",
     "proxy": "http://127.0.0.1:7890",
+    "allow_direct_fallback": False,
+    "chromium_no_sandbox": False,
     "enable_nsfw": True,
     "register_count": 1,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -64,23 +68,43 @@ _cloudmail_public_token_lock = threading.Lock()
 
 # ── 邮箱追踪 ──
 
-_EMAILS_USED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emails_used.txt")
-_EMAILS_ERROR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emails_error.txt")
+_EMAILS_USED_FILE = os.path.join(DATA_DIR, "emails_used.txt")
+_EMAILS_ERROR_FILE = os.path.join(DATA_DIR, "emails_error.txt")
 _email_track_lock = threading.Lock()
+
+
+def secure_append(path: str, text: str, *, lock: threading.Lock | None = None) -> None:
+    """Append a complete record and keep credential-bearing files mode 0600."""
+    def _write() -> None:
+        fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, text.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    if lock is None:
+        _write()
+    else:
+        with lock:
+            _write()
 
 
 def mark_used(email: str, password: str = ""):
     """记录成功注册的邮箱，防止重复使用。"""
-    with _email_track_lock:
-        with open(_EMAILS_USED_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{email}----{password}----ok\n")
+    secure_append(_EMAILS_USED_FILE, f"{email}----{password}----ok\n", lock=_email_track_lock)
 
 
 def mark_error(email: str, password: str = "", reason: str = ""):
     """记录失败邮箱及原因，避免重试烂邮箱。"""
-    with _email_track_lock:
-        with open(_EMAILS_ERROR_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{email}----{password}----{reason}\n")
+    secure_append(
+        _EMAILS_ERROR_FILE,
+        f"{email}----{password}----{reason}\n",
+        lock=_email_track_lock,
+    )
 
 
 def is_email_used(email: str) -> bool:
@@ -129,7 +153,7 @@ def configure_perf(**kwargs):
             PERF_FLAGS[k] = v
 
 
-_SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
+_SCREENSHOT_DIR = os.path.join(DATA_DIR, "screenshots")
 
 
 def dump_state(page, tag: str = ""):
@@ -166,30 +190,15 @@ def take_screenshot(page, tag: str = ""):
         ts = datetime.datetime.now().strftime("%H%M%S")
         path = os.path.join(_SCREENSHOT_DIR, f"{ts}_{tag}.png")
         page.get_screenshot(path=path)
+        os.chmod(path, 0o600)
         print(f"  [screenshot] saved: {path}")
     except Exception as e:
         print(f"  [screenshot] err: {e}")
 
 
-# ── 超时守卫 ──
-
-REGISTER_TIMEOUT = 180  # 单次注册总超时（秒）
-
-
-class TimeoutError(Exception):
-    pass
-
-
-def check_timeout(start_time: float):
-    """检查是否超过总超时时间。"""
-    elapsed = time.time() - start_time
-    if elapsed > REGISTER_TIMEOUT:
-        raise TimeoutError(f"注册超时 ({REGISTER_TIMEOUT}s, 已用 {elapsed:.0f}s)")
-
-
 # ── 全量 cookie 保存 ──
 
-_COOKIE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies", "grok")
+_COOKIE_DIR = os.path.join(DATA_DIR, "cookies", "grok")
 
 
 def save_cookies_snapshot(page, tag: str = "", email: str = ""):
@@ -211,8 +220,10 @@ def save_cookies_snapshot(page, tag: str = "", email: str = ""):
             "cookies": cookies,
         }
         path = os.path.join(_COOKIE_DIR, f"full_{ts}_{tag}.json")
-        with open(path, "w", encoding="utf-8") as f:
+        fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.chmod(path, 0o600)
         print(f"  [cookies] saved: {path} ({len(cookies)} cookies)")
     except Exception as e:
         print(f"  [cookies] save err: {e}")
@@ -269,8 +280,10 @@ def load_config():
 
 def save_config():
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        fd = os.open(CONFIG_FILE, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
+        os.chmod(CONFIG_FILE, 0o600)
     except Exception as e:
         print(f"保存配置失败: {e}")
 
@@ -426,8 +439,9 @@ def get_user_agent():
 def resolve_grok2api_local_token_file():
     configured = str(config.get("grok2api_local_token_file", "") or "").strip()
     if configured:
-        return configured
-    return r"D:\注册机\3255d5ee6e702db9220a897df64635a1ec9df644\vendor\grok2api\data\token.json"
+        configured = os.path.expanduser(configured)
+        return configured if os.path.isabs(configured) else os.path.join(DATA_DIR, configured)
+    return os.path.join(DATA_DIR, "grok2api", "token.json")
 
 
 def _normalize_sso_token(raw_token):
@@ -471,8 +485,10 @@ def add_token_to_grok2api_local_pool(raw_token, email="", log_callback=None):
     entry = {"token": token, "tags": ["auto-register"], "note": email}
     pool.append(entry)
     data[pool_name] = pool
-    with open(token_file, "w", encoding="utf-8") as f:
+    fd = os.open(token_file, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.chmod(token_file, 0o600)
     if log_callback:
         log_callback(f"[+] 已写入 grok2api 本地池: {pool_name} ({token_file})")
     return True
@@ -551,11 +567,23 @@ def _add_token_to_grok2api_pools_sync(raw_token, email="", log_callback=None):
             if log_callback:
                 log_callback(f"[Debug] 写入 grok2api 本地池失败: {exc}")
     if config.get("grok2api_auto_add_remote", False):
+        retries = max(1, int(config.get("grok2api_import_retries", 5) or 5))
+        retry_delay = max(0.0, float(config.get("grok2api_import_retry_delay", 2) or 2))
+        for attempt in range(1, retries + 1):
+            try:
+                add_token_to_grok2api_remote_pool(raw_token, email=email, log_callback=log_callback)
+                break
+            except Exception as exc:
+                if log_callback:
+                    log_callback(f"[Debug] 写入 grok2api 远端池失败 {attempt}/{retries}: {exc}")
+                if attempt < retries:
+                    time.sleep(retry_delay)
+    if config.get("enable_nsfw", False):
         try:
-            add_token_to_grok2api_remote_pool(raw_token, email=email, log_callback=log_callback)
+            enable_nsfw(raw_token, log_callback=log_callback)
         except Exception as exc:
             if log_callback:
-                log_callback(f"[Debug] 写入 grok2api 远端池失败: {exc}")
+                log_callback(f"[Debug] 注册后设置失败: {exc}")
 
 
 def add_token_to_grok2api_pools(raw_token, email="", log_callback=None):
@@ -581,7 +609,6 @@ def add_token_to_grok2api_pools(raw_token, email="", log_callback=None):
 CHROMIUM_SLIM_FLAGS = [
     "--disable-gpu",
     "--disable-software-rasterizer",
-    "--no-sandbox",
     "--disable-dev-shm-usage",
     "--disable-images",
     "--mute-audio",
@@ -596,6 +623,8 @@ def create_browser_options():
     options.set_timeouts(base=1)
     for flag in CHROMIUM_SLIM_FLAGS:
         options.set_argument(flag)
+    if config.get("chromium_no_sandbox", False):
+        options.set_argument("--no-sandbox")
     if os.path.exists(EXTENSION_PATH):
         options.add_extension(EXTENSION_PATH)
     # Apply config.json "proxy" to Chromium. Without this, only HTTP helpers
@@ -628,13 +657,18 @@ def _build_request_kwargs(**kwargs):
     return request_kwargs
 
 
+def _should_direct_fallback(exc: BaseException) -> bool:
+    if not config.get("allow_direct_fallback", False):
+        return False
+    err = str(exc)
+    return "127.0.0.1 port 7890" in err or "Could not connect to server" in err
+
+
 def http_get(url, **kwargs):
     try:
         return requests.get(url, **_build_request_kwargs(**kwargs))
     except Exception as exc:
-        err = str(exc)
-        # 代理不可用时自动回退为直连，避免整个流程直接失败
-        if "127.0.0.1 port 7890" in err or "Could not connect to server" in err:
+        if _should_direct_fallback(exc):
             retry_kwargs = dict(kwargs)
             retry_kwargs["proxies"] = {}
             return requests.get(url, **_build_request_kwargs(**retry_kwargs))
@@ -645,8 +679,7 @@ def http_post(url, **kwargs):
     try:
         return requests.post(url, **_build_request_kwargs(**kwargs))
     except Exception as exc:
-        err = str(exc)
-        if "127.0.0.1 port 7890" in err or "Could not connect to server" in err:
+        if _should_direct_fallback(exc):
             retry_kwargs = dict(kwargs)
             retry_kwargs["proxies"] = {}
             return requests.post(url, **_build_request_kwargs(**retry_kwargs))
@@ -1807,7 +1840,9 @@ def open_signup_page(log_callback=None, cancel_callback=None):
     if log_callback:
         log_callback(f"[*] 当前URL: {page.url}")
     click_email_signup_button(
-        log_callback=log_callback, cancel_callback=cancel_callback
+        timeout=float(config.get("nav_email_button_timeout", 12) or 12),
+        log_callback=log_callback,
+        cancel_callback=cancel_callback,
     )
     dump_state(page, "after-email-signup-click")
 
@@ -1829,10 +1864,11 @@ return !!(givenInput && familyInput && passwordInput);
         return False
 
 
-def fill_email_and_submit(timeout=15, log_callback=None, cancel_callback=None):
+def fill_email_and_submit(timeout=None, log_callback=None, cancel_callback=None):
+    if timeout is None:
+        timeout = float(config.get("email_form_timeout", 20) or 20)
     page = _get_page()
     raise_if_cancelled(cancel_callback)
-    check_timeout(time.time())
     email, dev_token = get_email_and_token()
     if not email or not dev_token:
         raise Exception("鑾峰彇閭澶辫触")
@@ -1925,14 +1961,36 @@ return true;
                 log_callback(f"[*] 已填写邮箱并点击注册: {email}")
             dump_state(page, "email-submitted")
             take_screenshot(page, "email-submitted")
-            return email, dev_token
+            confirm_deadline = time.time() + float(
+                config.get("email_submit_confirm_timeout", 30) or 30
+            )
+            while time.time() < confirm_deadline:
+                raise_if_cancelled(cancel_callback)
+                state = page.run_js(
+                    """
+function visible(node) {
+  if (!node) return false;
+  const s = getComputedStyle(node), r = node.getBoundingClientRect();
+  return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+}
+const email = [...document.querySelectorAll('input[type="email"], input[name="email"]')].find(visible);
+const code = [...document.querySelectorAll('input[autocomplete="one-time-code"], input[name="code"], input[data-input-otp="true"]')].find(visible);
+const profile = [...document.querySelectorAll('input[type="password"], input[name="givenName"]')].find(visible);
+return {emailVisible: !!email, advanced: !!code || !!profile};
+                    """
+                ) or {}
+                if state.get("advanced") or not state.get("emailVisible"):
+                    return email, dev_token
+                human_sleep(0.25, cancel_callback)
+            raise Exception("提交邮箱后页面未在限定时间内进入下一步")
         human_sleep(0.5, cancel_callback)
     raise Exception("未找到邮箱输入框或注册按钮")
 
 
-def fill_code_and_submit(email, dev_token, timeout=180, log_callback=None, cancel_callback=None):
+def fill_code_and_submit(email, dev_token, timeout=None, log_callback=None, cancel_callback=None):
+    if timeout is None:
+        timeout = float(config.get("code_form_timeout", 180) or 180)
     page = _get_page()
-    check_timeout(time.time())
     dump_state(page, "wait-code")
     take_screenshot(page, "wait-code")
     def _resend_code():
@@ -1951,6 +2009,8 @@ return false;
     code = get_oai_code(
         dev_token,
         email,
+        timeout=float(config.get("mail_timeout", 150) or 150),
+        poll_interval=float(config.get("mail_poll_interval", 0.3) or 0.3),
         log_callback=log_callback,
         cancel_callback=cancel_callback,
         resend_callback=_resend_code,
@@ -2088,8 +2148,25 @@ def getTurnstileToken(log_callback=None, cancel_callback=None):
     except Exception:
         pass
 
-    for _ in range(0, 20):
+    retry_limit = max(1, int(config.get("turnstile_retry_limit", 3) or 3))
+    stuck_timeout = max(5.0, float(config.get("turnstile_stuck_timeout", 150) or 150))
+    deadline = time.time() + stuck_timeout
+    reset_interval = stuck_timeout / retry_limit
+    next_reset_at = time.time() + reset_interval
+    reset_count = 0
+    while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+        if reset_count < retry_limit - 1 and time.time() >= next_reset_at:
+            try:
+                page.run_js(
+                    "try { if (window.turnstile && typeof turnstile.reset === 'function') turnstile.reset(); } catch(e) {}"
+                )
+                reset_count += 1
+                next_reset_at += reset_interval
+                if log_callback:
+                    log_callback(f"[*] Turnstile 超时重置 {reset_count}/{retry_limit - 1}")
+            except Exception:
+                pass
         try:
             token = page.run_js(
                 """
@@ -2181,9 +2258,10 @@ def build_profile():
     return given_name, family_name, password
 
 
-def fill_profile_and_submit(timeout=120, log_callback=None, cancel_callback=None):
+def fill_profile_and_submit(timeout=None, log_callback=None, cancel_callback=None):
+    if timeout is None:
+        timeout = float(config.get("profile_timeout", 240) or 240)
     page = _get_page()
-    check_timeout(time.time())
     dump_state(page, "profile-form")
     take_screenshot(page, "profile-form")
     given_name, family_name, password = build_profile()
@@ -2531,8 +2609,13 @@ def enable_nsfw(sso_cookie, log_callback=None):
 # ── wait_for_sso_cookie ──
 
 
-def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
-    deadline = time.time() + timeout
+def wait_for_sso_cookie(timeout=None, log_callback=None, cancel_callback=None):
+    max_timeout = float(config.get("sso_timeout_max", 480) or 480)
+    if timeout is None:
+        timeout = min(float(config.get("sso_timeout_base", 240) or 240), max_timeout)
+    started_at = time.time()
+    hard_deadline = started_at + max(timeout, max_timeout)
+    deadline = min(started_at + timeout, hard_deadline)
     last_seen_names = set()
     last_submit_retry = 0.0
     last_cf_retry_at = 0.0
@@ -2627,13 +2710,17 @@ return String(cfInput.value || '').trim().length;
                     name = str(getattr(item, "name", "")).strip()
                     value = str(getattr(item, "value", "")).strip()
 
-                if name:
+                if name and name not in last_seen_names:
                     last_seen_names.add(name)
+                    extension = float(config.get("sso_progress_extension", 120) or 120)
+                    deadline = min(max(deadline, time.time() + extension), hard_deadline)
 
                 if name == "sso" and value:
                     if log_callback:
                         log_callback("[*] 已获取到 sso cookie")
                     return value
+        except RegistrationCancelled:
+            raise
         except PageDisconnectedError:
             refresh_active_page()
         except Exception:
@@ -3257,8 +3344,11 @@ class GrokRegisterGUI:
             email, dev_token = fill_email_and_submit(log_callback=logf, cancel_callback=self.should_stop)
             logf(f"[*] 邮箱: {email}")
             try:
-                with open(os.path.join(os.path.dirname(__file__), "mail_credentials.txt"), "a", encoding="utf-8") as f:
-                    f.write(f"{email}\t{dev_token}\n")
+                secure_append(
+                    os.path.join(DATA_DIR, "mail_credentials.txt"),
+                    f"{email}\t{dev_token}\n",
+                    lock=_email_track_lock,
+                )
             except Exception:
                 pass
             logf("[*] 3. 拉取验证码")
@@ -3287,8 +3377,7 @@ class GrokRegisterGUI:
             self.success_count += 1
             line = f"{email}----{profile.get('password','')}----{sso}\n"
             try:
-                with open(self.accounts_output_file, "a", encoding="utf-8") as f:
-                    f.write(line)
+                secure_append(self.accounts_output_file, line, lock=_email_track_lock)
             except Exception as file_exc:
                 logf(f"[Debug] 保存账号文件失败: {file_exc}")
         add_token_to_grok2api_pools(sso, email=email, log_callback=logf)
@@ -3317,10 +3406,10 @@ class GrokRegisterGUI:
                     logf(f"[-] 注册失败: {exc}")
                 finally:
                     self.update_stats()
-                    if self.should_stop():
-                        break
-                    restart_browser(log_callback=logf)
-                    sleep_with_cancel(1, self.should_stop)
+                if self.should_stop():
+                    break
+                restart_browser(log_callback=logf)
+                sleep_with_cancel(1, self.should_stop)
         except Exception as exc:
             logf(f"[!] 线程异常: {exc}")
         finally:

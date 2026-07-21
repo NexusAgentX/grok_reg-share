@@ -15,8 +15,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 _REG_DIR = Path(__file__).resolve().parent
-_DEFAULT_OUT = _REG_DIR / "cpa_auths"
+_DATA_DIR = Path(os.environ.get("GROK_REG_DATA_DIR", _REG_DIR)).expanduser().resolve()
+_DEFAULT_OUT = _DATA_DIR / "cpa_auths"
 _DEFAULT_CPA = Path("")  # empty = do not assume a machine-local CPA path
+
+
+def _runtime_path(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else _DATA_DIR / path
 
 
 def _ensure_cpa_xai_on_path(tools_dir: str | Path | None = None) -> Path:
@@ -73,6 +79,7 @@ def export_cpa_xai_for_account(
     sso: str | None = None,
     config: dict | None = None,
     log_callback: Callable[[str], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> dict:
     """Mint OIDC + write xai-<email>.json under register cpa_auths (and optional CPA auth-dir)."""
     cfg = config or {}
@@ -91,12 +98,12 @@ def export_cpa_xai_for_account(
         log(f"[cpa] import cpa_xai failed: {e}")
         return {"ok": False, "error": f"import: {e}"}
 
-    out_dir = Path(cfg.get("cpa_auth_dir") or _DEFAULT_OUT).expanduser()
+    out_dir = _runtime_path(cfg.get("cpa_auth_dir") or _DEFAULT_OUT)
     if not out_dir.is_absolute():
         out_dir = (_REG_DIR / out_dir).resolve()
 
     hotload_raw = (cfg.get("cpa_hotload_dir") or "").strip()
-    cpa_dir = Path(hotload_raw).expanduser() if hotload_raw else None
+    cpa_dir = _runtime_path(hotload_raw) if hotload_raw else None
     if cpa_dir and not cpa_dir.is_absolute():
         cpa_dir = (_REG_DIR / cpa_dir).resolve()
 
@@ -174,6 +181,7 @@ def export_cpa_xai_for_account(
         reuse_browser=reuse_browser,
         recycle_every=recycle_every,
         log=_log,
+        cancel=cancel_callback,
     )
 
     if result.get("ok") and result.get("path") and cfg.get("cpa_copy_to_hotload", False) and cpa_dir:
