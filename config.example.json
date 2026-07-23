@@ -3,7 +3,7 @@
   "//_paths": "相对路径相对运行数据目录；裸机默认项目目录，Docker 默认 /data。CPA 外部热加载目录建议使用绝对路径。",
 
   "// ===== 邮箱：注册验证码来源 =====": "",
-  "// email_provider": "cloudmail | cloudflare | duckmail | yyds。推荐自建 cloudmail。",
+  "// email_provider": "cloudmail | cloudflare | duckmail | yyds | moemail。浏览器回退可直接使用 MoeMail。",
   "email_provider": "cloudmail",
   "// defaultDomains": "注册用邮箱域名，逗号分隔；cloudmail catch-all 域名写这里。",
   "defaultDomains": "example.com",
@@ -32,7 +32,7 @@
   "yyds_api_key": "",
   "yyds_jwt": "",
 
-  "// ===== 快速协议注册（可选） =====": "",
+  "// ===== MoeMail 与快速协议注册（可选） =====": "",
   "// registration_mode": "browser=稳定完整浏览器；fast=浏览器采集令牌后走协议；auto=协议失败后自动回退完整浏览器。",
   "registration_mode": "browser",
   "// fast_mail_provider": "快速模式目前仅支持 moemail；与上面的稳定模式 email_provider 相互独立。",
@@ -42,6 +42,10 @@
   "moemail_cookie": "",
   "moemail_domain": "moemail.app",
   "moemail_expiry_time": 3600000,
+  "// moemail_delete_timeout": "删除本次临时邮箱的单次请求超时秒数。",
+  "moemail_delete_timeout": 8,
+  "// mail_cleanup_retries": "临时邮箱清理重试次数，范围 1-3。",
+  "mail_cleanup_retries": 2,
   "// fast_token_headless": "采集 Castle/Turnstile 的浏览器是否无头；默认 false 更稳定。",
   "fast_token_headless": false,
   "// fast_token_timeout": "快速模式采集 Turnstile 的最长等待秒数。",

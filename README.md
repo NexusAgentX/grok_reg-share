@@ -50,7 +50,7 @@
 | `mise` + `uv` + Python 3.13 | 本目录 `mise.toml` / `uv.lock` |
 | `chromium` | DrissionPage 驱动 |
 | 代理 | xAI / accounts.x.ai 通常需要，如 `http://127.0.0.1:7890` |
-| 快速模式邮箱 | MoeMail API key 或登录 Cookie；稳定浏览器模式仍使用主邮箱配置 |
+| MoeMail（可选） | API key 或登录 Cookie；快速协议和稳定浏览器回退均可使用 |
 | 可选 | 本机 grok2api `:8000`、CLIProxyAPI(CPA) `:8317` |
 
 ```bash
@@ -117,7 +117,17 @@ cp config.example.json config.json
 | `fast` | Chromium 采集 Castle/Turnstile，邮箱验证和创建账号走协议 | 4 |
 | `auto` | 先走 `fast`，账号创建前明确失败时回退 `browser` | 4 |
 
-`fast`/`auto` 目前要求 `fast_mail_provider=moemail`，并配置 `moemail_api_key` 或 `moemail_cookie`。快速路径只删除本次创建的临时邮箱；达到 MoeMail 数量上限时直接失败，不会清理已有邮箱。若 `create_user` 已发出但结果不确定，`auto` 会停止该账号而不是回退或重试，避免产生重复或孤儿账号。
+`fast`/`auto` 目前要求 `fast_mail_provider=moemail`，并配置 `moemail_api_key` 或 `moemail_cookie`。将 `email_provider` 也设为 `moemail` 后，稳定浏览器及 `auto` 回退可以复用同一套 MoeMail 凭据；回退会创建新的临时邮箱，不复用快速阶段的验证会话。两个路径都只删除本次创建的邮箱，达到数量上限时直接失败，不会清理已有邮箱。若 `create_user` 已发出但结果不确定，`auto` 会停止该账号而不是回退或重试，避免产生重复或孤儿账号。
+
+```json
+{
+  "registration_mode": "auto",
+  "fast_mail_provider": "moemail",
+  "email_provider": "moemail",
+  "moemail_api_key": "",
+  "moemail_cookie": ""
+}
+```
 
 Web 控制台可在任务面板逐次选择模式。CLI 可用 `--registration-mode browser|fast|auto` 覆盖配置：
 

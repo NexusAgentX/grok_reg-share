@@ -1,4 +1,4 @@
-"""Temp-mail helpers for pure-api (MoeMail first; falls back to project providers)."""
+"""Shared MoeMail helpers for fast and browser registration modes."""
 
 from __future__ import annotations
 
@@ -8,7 +8,12 @@ from typing import Any, Callable
 
 from curl_cffi import requests
 
-from .errors import CancelFn, raise_if_cancelled, sleep_with_cancel
+from .errors import (
+    CancelFn,
+    FastRegistrationCancelled,
+    raise_if_cancelled,
+    sleep_with_cancel,
+)
 from .session import HTTP_IMPERSONATE, normalize_proxy, proxies_dict
 
 
@@ -47,15 +52,19 @@ def create_mailbox(
         timeout=30,
         impersonate=HTTP_IMPERSONATE,
     )
-    raise_if_cancelled(cancel_callback)
     if r.status_code == 403:
-        raise RuntimeError("MoeMail 邮箱数量已达上限；快速模式不会自动删除已有邮箱")
+        raise RuntimeError("MoeMail 邮箱数量已达上限；程序不会自动删除已有邮箱")
     r.raise_for_status()
     data = r.json()
     email = data.get("email") or data.get("address")
     email_id = data.get("id") or data.get("emailId")
     if not email or not email_id:
         raise RuntimeError(f"MoeMail create failed: {data}")
+    try:
+        raise_if_cancelled(cancel_callback)
+    except FastRegistrationCancelled:
+        delete_mailbox(config, str(email_id), log=log)
+        raise
     if log:
         log(f"[mail] created {email}")
     return str(email), str(email_id)
@@ -184,7 +193,7 @@ def delete_mailbox(
             f"{base}/api/emails/{email_id}",
             headers=_headers(config),
             proxies=proxies_dict(proxy),
-            timeout=15,
+            timeout=max(3.0, float(config.get("moemail_delete_timeout", 8) or 8)),
             impersonate=HTTP_IMPERSONATE,
         )
         ok = 200 <= int(r.status_code) < 300 or int(r.status_code) == 404

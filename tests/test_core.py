@@ -120,6 +120,130 @@ class CoreBehaviorTestCase(unittest.TestCase):
         finally:
             reg.config = previous
 
+    def test_moemail_is_available_to_browser_registration(self):
+        previous = dict(reg.config)
+        reg.config = {
+            "email_provider": "moemail",
+            "moemail_api_key": "test-key",
+            "mail_cleanup_retries": 1,
+        }
+        cancel = lambda: False
+        try:
+            with patch.object(
+                fast_mail,
+                "create_mailbox",
+                return_value=("browser@moemail.app", "mailbox-id"),
+            ) as create, patch.object(
+                fast_mail, "poll_code", return_value="ABC-123"
+            ) as poll, patch.object(
+                fast_mail, "delete_mailbox", return_value=True
+            ) as delete:
+                email, token = reg.get_email_and_token(
+                    log_callback=lambda _msg: None,
+                    cancel_callback=cancel,
+                )
+                code = reg.get_oai_code(
+                    token,
+                    email,
+                    timeout=30,
+                    poll_interval=0.1,
+                    cancel_callback=cancel,
+                )
+                released = reg.release_email(token)
+            self.assertEqual((email, token, code), ("browser@moemail.app", "mailbox-id", "ABC-123"))
+            self.assertTrue(released)
+            create.assert_called_once()
+            poll.assert_called_once()
+            delete.assert_called_once()
+
+            reg.config["email_provider"] = "cloudmail"
+            self.assertIsNone(reg.release_email("not-provider-owned"))
+            reg.config["email_provider"] = "moemail"
+            with patch.object(
+                fast_mail,
+                "create_mailbox",
+                side_effect=FastRegistrationCancelled("stop"),
+            ):
+                with self.assertRaises(reg.RegistrationCancelled):
+                    reg.get_email_and_token(cancel_callback=lambda: True)
+        finally:
+            reg.config = previous
+
+    def test_browser_registration_releases_moemail_when_form_fails_early(self):
+        previous = dict(reg.config)
+        reg.config = {
+            "email_provider": "moemail",
+            "mail_retry_count": 1,
+            "account_hard_timeout": 30,
+        }
+
+        def create_then_fail(*, on_created, **_kwargs):
+            on_created("early@moemail.app", "early-mailbox-id")
+            raise RuntimeError("email form failed")
+
+        try:
+            with patch.object(cli, "_ensure_browser"), patch.object(
+                reg, "open_signup_page"
+            ), patch.object(
+                reg, "fill_email_and_submit", side_effect=create_then_fail
+            ), patch.object(
+                reg, "release_email", return_value=True
+            ) as release, patch.object(
+                reg, "restart_browser"
+            ), patch("register_cli.traceback.print_exc"):
+                result = cli.register_one(
+                    1,
+                    1,
+                    1,
+                    "unused.txt",
+                    registration_mode="browser",
+                )
+            self.assertIsNone(result)
+            release.assert_called_once_with(
+                "early-mailbox-id",
+                log_callback=unittest.mock.ANY,
+            )
+        finally:
+            reg.config = previous
+
+    def test_browser_registration_releases_moemail_after_code(self):
+        previous = dict(reg.config)
+        reg.config = {
+            "email_provider": "moemail",
+            "mail_retry_count": 1,
+            "account_hard_timeout": 30,
+        }
+        try:
+            with patch.object(cli, "_ensure_browser"), patch.object(
+                reg, "open_signup_page"
+            ), patch.object(
+                reg,
+                "fill_email_and_submit",
+                return_value=("browser@moemail.app", "mailbox-id"),
+            ), patch.object(
+                reg, "fill_code_and_submit", return_value="ABC-123"
+            ), patch.object(
+                reg, "release_email", return_value=True
+            ) as release, patch.object(
+                reg, "fill_profile_and_submit", side_effect=RuntimeError("profile failed")
+            ), patch.object(reg, "mark_error"), patch.object(
+                reg, "restart_browser"
+            ), patch("register_cli.traceback.print_exc"):
+                result = cli.register_one(
+                    1,
+                    1,
+                    1,
+                    "unused.txt",
+                    registration_mode="browser",
+                )
+            self.assertIsNone(result)
+            release.assert_called_once_with(
+                "mailbox-id",
+                log_callback=unittest.mock.ANY,
+            )
+        finally:
+            reg.config = previous
+
     def test_registration_modes_and_auto_fallback(self):
         self.assertEqual(cli.resolve_registration_mode(None, {}), "browser")
         self.assertEqual(cli.resolve_registration_mode("protocol", {}), "fast")
@@ -238,6 +362,23 @@ class CoreBehaviorTestCase(unittest.TestCase):
             [call.kwargs["type"] for call in page.run_cdp.call_args_list],
             ["mouseMoved", "mousePressed", "mouseReleased"],
         )
+
+    def test_moemail_creation_cancellation_deletes_created_mailbox(self):
+        response = unittest.mock.Mock(status_code=200)
+        response.json.return_value = {
+            "email": "cancelled@moemail.app",
+            "id": "cancelled-mailbox-id",
+        }
+        cancel = unittest.mock.Mock(side_effect=[False, True])
+        with patch.object(fast_mail.requests, "post", return_value=response), patch.object(
+            fast_mail, "delete_mailbox", return_value=True
+        ) as delete:
+            with self.assertRaises(FastRegistrationCancelled):
+                fast_mail.create_mailbox(
+                    {"moemail_api_key": "test-key"},
+                    cancel_callback=cancel,
+                )
+        delete.assert_called_once()
 
     def test_pure_registration_can_cancel_before_network(self):
         with patch("pure_api.register.make_session") as make_session:

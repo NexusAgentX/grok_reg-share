@@ -654,10 +654,12 @@ const CONFIG_SECTIONS = {
     "cloudflare_path_domains", "cloudflare_path_accounts", "cloudflare_path_token", "cloudflare_path_messages",
     "duckmail_api_key", "yyds_api_key", "yyds_jwt"
   ],
+  "MoeMail 邮箱": [
+    "moemail_api_base", "moemail_api_key", "moemail_cookie", "moemail_domain",
+    "moemail_expiry_time", "moemail_delete_timeout", "mail_cleanup_retries"
+  ],
   "快速协议注册": [
-    "registration_mode", "fast_mail_provider", "moemail_api_base", "moemail_api_key",
-    "moemail_cookie", "moemail_domain", "moemail_expiry_time",
-    "fast_token_headless", "fast_token_timeout"
+    "registration_mode", "fast_mail_provider", "fast_token_headless", "fast_token_timeout"
   ],
   "网络与浏览器": [
     "proxy", "cpa_proxy", "user_agent", "enable_nsfw"
@@ -708,6 +710,8 @@ const CONFIG_LABELS = {
   "moemail_cookie": "MoeMail 登录 Cookie",
   "moemail_domain": "MoeMail 邮箱域名",
   "moemail_expiry_time": "MoeMail 邮箱有效期（毫秒）",
+  "moemail_delete_timeout": "MoeMail 清理请求超时（秒）",
+  "mail_cleanup_retries": "临时邮箱清理重试次数",
   "fast_token_headless": "快速采集浏览器无头模式",
   "fast_token_timeout": "快速令牌采集超时（秒）",
   "proxy": "注册主代理（可留空）",
@@ -899,7 +903,8 @@ function createFieldMarkup(key, val, container) {
       ['cloudmail', 'CloudMail 自建邮箱'],
       ['cloudflare', 'Cloudflare Worker 临时邮箱'],
       ['duckmail', 'DuckMail'],
-      ['yyds', 'YYDS 邮箱']
+      ['yyds', 'YYDS 邮箱'],
+      ['moemail', 'MoeMail 临时邮箱']
     ]) {
       control.add(new Option(text, value));
     }

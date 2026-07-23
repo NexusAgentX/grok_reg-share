@@ -219,6 +219,30 @@ def _register_one_browser(
     hard_timeout = max(1.0, float(cfg.get("account_hard_timeout", 720) or 720))
     cancel = CancelGuard(cancel_event, hard_timeout)
 
+    def _remember_mailbox(created_email: str, created_token: str) -> None:
+        nonlocal email, dev_token
+        email = str(created_email or "")
+        dev_token = str(created_token or "")
+
+    def _release_mailbox(reason: str) -> bool:
+        nonlocal dev_token
+        if not dev_token:
+            return True
+        token = dev_token
+        try:
+            released = reg.release_email(
+                token,
+                log_callback=lambda m: log(worker_id, m),
+            )
+        except Exception as exc:
+            log(worker_id, f"[mail] 临时邮箱清理异常 ({reason}): {exc}")
+            return False
+        if released is not False:
+            dev_token = ""
+        if released is True:
+            log(worker_id, f"[mail] MoeMail 临时邮箱已释放 ({reason})")
+        return released is not False
+
     try:
         _ensure_browser(worker_id, force_recycle=False)
     except Exception as exc:
@@ -232,7 +256,9 @@ def _register_one_browser(
             reg.open_signup_page(log_callback=lambda m: log(worker_id, m), cancel_callback=cancel)
             log(worker_id, "2. 创建邮箱并提交")
             email, dev_token = reg.fill_email_and_submit(
-                log_callback=lambda m: log(worker_id, m), cancel_callback=cancel
+                log_callback=lambda m: log(worker_id, m),
+                cancel_callback=cancel,
+                on_created=_remember_mailbox,
             )
             log(worker_id, f"邮箱: {email}")
             log(worker_id, "3. 拉取验证码")
@@ -243,9 +269,11 @@ def _register_one_browser(
                 cancel_callback=cancel,
             )
             log(worker_id, f"验证码: {code}")
+            _release_mailbox("code-received")
             break
         except reg.RegistrationCancelled:
             log(worker_id, "! 注册已取消")
+            _release_mailbox("cancelled")
             try:
                 reg.stop_browser()
             except Exception:
@@ -253,6 +281,7 @@ def _register_one_browser(
             return None
         except Exception as exc:
             msg = str(exc)
+            _release_mailbox("mail-stage-failed")
             if ("未收到验证码" in msg or "验证码" in msg) and mail_try < max_mail_retry:
                 log(worker_id, f"! 本邮箱未取到验证码，换邮箱重试: {msg}")
                 try:
@@ -285,6 +314,7 @@ def _register_one_browser(
         reg.secure_append(accounts_file, line, lock=_accounts_file_lock)
         log(worker_id, f"+ 注册成功: {email}")
         reg.mark_used(email, password)
+        _release_mailbox("registration-complete")
 
         # Capture cookies BEFORE releasing browser (for mint cookie inject)
         page = reg._get_page()
@@ -358,6 +388,7 @@ def _register_one_browser(
         return job
     except reg.RegistrationCancelled:
         log(worker_id, "! 注册已取消")
+        _release_mailbox("cancelled-after-code")
         try:
             reg.stop_browser()
         except Exception:
@@ -365,6 +396,7 @@ def _register_one_browser(
         return None
     except Exception as exc:
         log(worker_id, f"! 注册失败: {exc}")
+        _release_mailbox("registration-failed")
         reg.mark_error(email or "", reason=str(exc)[:120])
         traceback.print_exc()
         _inc("reg_fail")

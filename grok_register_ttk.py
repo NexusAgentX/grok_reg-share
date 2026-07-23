@@ -30,7 +30,13 @@ DATA_DIR = os.path.abspath(os.path.expanduser(os.environ.get("GROK_REG_DATA_DIR"
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
 DEFAULT_CONFIG = {
+    "email_provider": "cloudmail",
     "duckmail_api_key": "",
+    "moemail_api_base": "https://moemail.app",
+    "moemail_api_key": "",
+    "moemail_cookie": "",
+    "moemail_domain": "moemail.app",
+    "moemail_expiry_time": 3600000,
     "cloudflare_api_base": "",
     "cloudflare_api_key": "",
     "cloudflare_auth_mode": "bearer",
@@ -1278,8 +1284,20 @@ def get_email_provider():
     return config.get("email_provider", "duckmail")
 
 
-def get_email_and_token(api_key=None):
-    provider = get_email_provider()
+def get_email_and_token(api_key=None, log_callback=None, cancel_callback=None):
+    provider = str(get_email_provider() or "").strip().lower()
+    if provider == "moemail":
+        from pure_api.errors import FastRegistrationCancelled
+        from pure_api.mail import create_mailbox
+
+        try:
+            return create_mailbox(
+                config,
+                log=log_callback,
+                cancel_callback=cancel_callback,
+            )
+        except FastRegistrationCancelled as exc:
+            raise RegistrationCancelled(str(exc)) from exc
     if provider == "yyds":
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
     if provider == "cloudmail":
@@ -1337,6 +1355,25 @@ def get_email_and_token(api_key=None):
     return address, token
 
 
+def release_email(dev_token, log_callback=None):
+    """Return True when deleted, None when no cleanup applies, or False on failure."""
+    provider = str(get_email_provider() or "").strip().lower()
+    if provider != "moemail" or not dev_token:
+        return None
+
+    from pure_api.mail import delete_mailbox
+
+    retries = max(1, min(3, int(config.get("mail_cleanup_retries", 2) or 2)))
+    for attempt in range(1, retries + 1):
+        if delete_mailbox(config, str(dev_token), log=log_callback):
+            return True
+        if attempt < retries:
+            time.sleep(0.5 * attempt)
+    if log_callback:
+        log_callback("[mail] MoeMail 临时邮箱清理失败，将等待服务端自动过期")
+    return False
+
+
 def get_oai_code(
     dev_token,
     email,
@@ -1346,7 +1383,23 @@ def get_oai_code(
     cancel_callback=None,
     resend_callback=None,
 ):
-    provider = get_email_provider()
+    provider = str(get_email_provider() or "").strip().lower()
+    if provider == "moemail":
+        from pure_api.errors import FastRegistrationCancelled
+        from pure_api.mail import poll_code
+
+        try:
+            return poll_code(
+                config,
+                email,
+                str(dev_token),
+                timeout=timeout,
+                poll_interval=poll_interval,
+                log=log_callback,
+                cancel_callback=cancel_callback,
+            )
+        except FastRegistrationCancelled as exc:
+            raise RegistrationCancelled(str(exc)) from exc
     if provider == "yyds":
         return yyds_get_oai_code(
             dev_token,
@@ -1864,14 +1917,24 @@ return !!(givenInput && familyInput && passwordInput);
         return False
 
 
-def fill_email_and_submit(timeout=None, log_callback=None, cancel_callback=None):
+def fill_email_and_submit(
+    timeout=None,
+    log_callback=None,
+    cancel_callback=None,
+    on_created=None,
+):
     if timeout is None:
         timeout = float(config.get("email_form_timeout", 20) or 20)
     page = _get_page()
     raise_if_cancelled(cancel_callback)
-    email, dev_token = get_email_and_token()
+    email, dev_token = get_email_and_token(
+        log_callback=log_callback,
+        cancel_callback=cancel_callback,
+    )
     if not email or not dev_token:
         raise Exception("鑾峰彇閭澶辫触")
+    if on_created is not None:
+        on_created(email, dev_token)
     if log_callback:
         log_callback(f"[*] 宸插垱寤洪偖绠? {email}")
     deadline = time.time() + timeout
@@ -2965,7 +3028,7 @@ class GrokRegisterGUI:
         config_frame.pack(fill=tk.X, pady=5)
         ttk.Label(config_frame, text="邮箱服务商:").grid(row=0, column=0, sticky=tk.W)
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = ttk.Combobox(config_frame, textvariable=self.email_provider_var, values=["duckmail", "yyds", "cloudflare", "cloudmail"], width=12, state="readonly")
+        self.email_provider_combo = ttk.Combobox(config_frame, textvariable=self.email_provider_var, values=["duckmail", "yyds", "cloudflare", "cloudmail", "moemail"], width=12, state="readonly")
         self.email_provider_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
         ttk.Label(config_frame, text="注册数量:").grid(row=0, column=2, sticky=tk.W, padx=10)
         self.count_var = tk.StringVar(value=str(config.get("register_count", 1)))
@@ -3140,6 +3203,7 @@ class GrokRegisterGUI:
 - yyds: 需要 YYDS API Key 或 JWT
 - cloudflare: 需要 Cloudflare API Base（cloudflare_temp_email 临时邮箱）
 - cloudmail: 需要 CloudMail URL + 密码 + defaultDomains（maillab/cloud-mail 完整邮箱）
+- moemail: 需要在 config.json 或 Web 控制台填写 MoeMail API Key/Cookie
 
 2) Cloudflare API Base（cloudflare 模式必填）
 - 示例: https://xxxx.pages.dev
@@ -3292,6 +3356,11 @@ class GrokRegisterGUI:
         save_config()
         if config["email_provider"] == "cloudflare" and not config["cloudflare_api_base"]:
             self.log("[!] Cloudflare 模式需要先填写 Cloudflare API Base")
+            return
+        if config["email_provider"] == "moemail" and not (
+            config.get("moemail_api_key") or config.get("moemail_cookie")
+        ):
+            self.log("[!] MoeMail 模式需要在 config.json 或 Web 控制台填写 API Key/Cookie")
             return
         if config["email_provider"] == "cloudmail":
             if not config.get("cloudmail_url"):
