@@ -652,11 +652,12 @@ const CONFIG_SECTIONS = {
     "cloudmail_url", "cloudmail_admin_email", "cloudmail_password",
     "cloudflare_api_base", "cloudflare_api_key", "cloudflare_auth_mode",
     "cloudflare_path_domains", "cloudflare_path_accounts", "cloudflare_path_token", "cloudflare_path_messages",
-    "duckmail_api_key", "yyds_api_key", "yyds_jwt"
+    "duckmail_api_key", "duckmail_expiry_seconds", "mail_cleanup_retries",
+    "yyds_api_key", "yyds_jwt"
   ],
   "MoeMail 邮箱": [
     "moemail_api_base", "moemail_api_key", "moemail_cookie", "moemail_domain",
-    "moemail_expiry_time", "moemail_delete_timeout", "mail_cleanup_retries"
+    "moemail_expiry_time", "moemail_delete_timeout"
   ],
   "快速协议注册": [
     "registration_mode", "fast_mail_provider", "fast_token_headless", "fast_token_timeout"
@@ -700,7 +701,8 @@ const CONFIG_LABELS = {
   "cloudflare_path_accounts": "新建邮箱接口路径",
   "cloudflare_path_token": "获取 Token 接口路径",
   "cloudflare_path_messages": "收取邮件接口路径",
-  "duckmail_api_key": "DuckMail API 密钥",
+  "duckmail_api_key": "DuckMail API 密钥（公共域名可留空）",
+  "duckmail_expiry_seconds": "DuckMail 邮箱有效期（秒）",
   "yyds_api_key": "YYDS API 密钥",
   "yyds_jwt": "YYDS JWT 凭证",
   "registration_mode": "默认注册模式",

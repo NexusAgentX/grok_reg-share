@@ -240,7 +240,7 @@ def _register_one_browser(
         if released is not False:
             dev_token = ""
         if released is True:
-            log(worker_id, f"[mail] MoeMail 临时邮箱已释放 ({reason})")
+            log(worker_id, f"[mail] 临时邮箱已释放 ({reason})")
         return released is not False
 
     try:

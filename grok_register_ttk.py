@@ -32,6 +32,7 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 DEFAULT_CONFIG = {
     "email_provider": "cloudmail",
     "duckmail_api_key": "",
+    "duckmail_expiry_seconds": 86400,
     "moemail_api_base": "https://moemail.app",
     "moemail_api_key": "",
     "moemail_cookie": "",
@@ -692,6 +693,17 @@ def http_post(url, **kwargs):
         raise
 
 
+def http_delete(url, **kwargs):
+    try:
+        return requests.delete(url, **_build_request_kwargs(**kwargs))
+    except Exception as exc:
+        if _should_direct_fallback(exc):
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["proxies"] = {}
+            return requests.delete(url, **_build_request_kwargs(**retry_kwargs))
+        raise
+
+
 def raise_if_cancelled(cancel_callback=None):
     if cancel_callback and cancel_callback():
         raise RegistrationCancelled("鐢ㄦ埛鍋滄娉ㄥ唽")
@@ -738,7 +750,7 @@ def get_domains(api_key=None):
     return resp.json().get("hydra:member", [])
 
 
-def create_account(address, password, api_key=None, expires_in=0):
+def create_account(address, password, api_key=None, expires_in=86400):
     headers = {"Content-Type": "application/json"}
     key = api_key or get_duckmail_api_key()
     if key:
@@ -768,6 +780,33 @@ def get_message_detail(token, message_id):
     resp = http_get(f"{DUCKMAIL_API_BASE}/messages/{message_id}", headers=headers)
     resp.raise_for_status()
     return resp.json()
+
+
+def delete_duckmail_account(token, log_callback=None):
+    """Delete the DuckMail account represented by a mailbox bearer token."""
+    if not token:
+        return False
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        me = http_get(f"{DUCKMAIL_API_BASE}/me", headers=headers)
+        if me.status_code == 404:
+            return True
+        me.raise_for_status()
+        account_id = str((me.json() or {}).get("id") or "").strip()
+        if not account_id:
+            raise RuntimeError("DuckMail /me response did not include account id")
+        response = http_delete(
+            f"{DUCKMAIL_API_BASE}/accounts/{account_id}",
+            headers=headers,
+        )
+        if response.status_code == 404:
+            return True
+        response.raise_for_status()
+        return 200 <= int(response.status_code) < 300
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[mail] DuckMail 临时邮箱清理失败: {exc}")
+        return False
 
 
 def cloudflare_get_domains(api_base, api_key=None):
@@ -1348,7 +1387,16 @@ def get_email_and_token(api_key=None, log_callback=None, cancel_callback=None):
     username = generate_username(10)
     address = f"{username}@{domain}"
     password = secrets.token_urlsafe(12)
-    create_account(address, password, api_key=key, expires_in=0)
+    expiry_seconds = max(
+        300,
+        min(604800, int(config.get("duckmail_expiry_seconds", 86400) or 86400)),
+    )
+    create_account(
+        address,
+        password,
+        api_key=key,
+        expires_in=expiry_seconds,
+    )
     token = get_token(address, password)
     if not token:
         raise Exception("鑾峰彇 DuckMail token 澶辫触")
@@ -1358,19 +1406,35 @@ def get_email_and_token(api_key=None, log_callback=None, cancel_callback=None):
 def release_email(dev_token, log_callback=None):
     """Return True when deleted, None when no cleanup applies, or False on failure."""
     provider = str(get_email_provider() or "").strip().lower()
-    if provider != "moemail" or not dev_token:
+    if provider not in {"moemail", "duckmail"} or not dev_token:
         return None
 
-    from pure_api.mail import delete_mailbox
+    if provider == "moemail":
+        from pure_api.mail import delete_mailbox
+
+        delete_once = lambda: delete_mailbox(
+            config,
+            str(dev_token),
+            log=log_callback,
+        )
+        provider_name = "MoeMail"
+    else:
+        delete_once = lambda: delete_duckmail_account(
+            str(dev_token),
+            log_callback=log_callback,
+        )
+        provider_name = "DuckMail"
 
     retries = max(1, min(3, int(config.get("mail_cleanup_retries", 2) or 2)))
     for attempt in range(1, retries + 1):
-        if delete_mailbox(config, str(dev_token), log=log_callback):
+        if delete_once():
             return True
         if attempt < retries:
             time.sleep(0.5 * attempt)
     if log_callback:
-        log_callback("[mail] MoeMail 临时邮箱清理失败，将等待服务端自动过期")
+        log_callback(
+            f"[mail] {provider_name} 临时邮箱清理失败，将等待服务端自动过期"
+        )
     return False
 
 

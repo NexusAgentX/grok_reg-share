@@ -120,6 +120,48 @@ class CoreBehaviorTestCase(unittest.TestCase):
         finally:
             reg.config = previous
 
+    def test_duckmail_accounts_expire_and_are_deleted_after_use(self):
+        previous = dict(reg.config)
+        reg.config = {
+            "email_provider": "duckmail",
+            "duckmail_api_key": "",
+            "duckmail_expiry_seconds": 86400,
+            "mail_cleanup_retries": 1,
+        }
+        try:
+            with patch.object(reg, "pick_domain", return_value="public.duck.test"), patch.object(
+                reg, "generate_username", return_value="temporary-user"
+            ), patch.object(reg, "create_account") as create, patch.object(
+                reg, "get_token", return_value="mailbox-token"
+            ):
+                email, token = reg.get_email_and_token()
+            self.assertEqual(email, "temporary-user@public.duck.test")
+            self.assertEqual(token, "mailbox-token")
+            create.assert_called_once_with(
+                email,
+                unittest.mock.ANY,
+                api_key="",
+                expires_in=86400,
+            )
+
+            me = unittest.mock.Mock(status_code=200)
+            me.json.return_value = {"id": "duck-account-id"}
+            deleted = unittest.mock.Mock(status_code=204)
+            with patch.object(reg, "http_get", return_value=me) as get, patch.object(
+                reg, "http_delete", return_value=deleted
+            ) as delete:
+                self.assertTrue(reg.release_email(token))
+            get.assert_called_once_with(
+                f"{reg.DUCKMAIL_API_BASE}/me",
+                headers={"Authorization": "Bearer mailbox-token"},
+            )
+            delete.assert_called_once_with(
+                f"{reg.DUCKMAIL_API_BASE}/accounts/duck-account-id",
+                headers={"Authorization": "Bearer mailbox-token"},
+            )
+        finally:
+            reg.config = previous
+
     def test_moemail_is_available_to_browser_registration(self):
         previous = dict(reg.config)
         reg.config = {
@@ -433,6 +475,14 @@ class CoreBehaviorTestCase(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     reg.http_get("https://example.test")
             self.assertEqual(get.call_count, 1)
+            with patch.object(
+                reg.requests,
+                "delete",
+                side_effect=RuntimeError("Could not connect to server"),
+            ) as delete:
+                with self.assertRaises(RuntimeError):
+                    reg.http_delete("https://example.test/resource")
+            self.assertEqual(delete.call_count, 1)
         finally:
             reg.config = previous
 

@@ -129,6 +129,17 @@ cp config.example.json config.json
 }
 ```
 
+零付费方案可使用 DuckMail 公共域名。API Key 留空即可；注册器将邮箱设置为 24 小时自动过期，并在验证码处理完成、失败或取消时主动删除本次邮箱：
+
+```json
+{
+  "registration_mode": "browser",
+  "email_provider": "duckmail",
+  "duckmail_api_key": "",
+  "duckmail_expiry_seconds": 86400
+}
+```
+
 Web 控制台可在任务面板逐次选择模式。CLI 可用 `--registration-mode browser|fast|auto` 覆盖配置：
 
 ```bash
