@@ -30,6 +30,8 @@
   "duckmail_api_key": "",
   "// duckmail_expiry_seconds": "DuckMail 临时邮箱过期秒数；默认 24 小时，范围 300-604800。",
   "duckmail_expiry_seconds": 86400,
+  "// duckmail_excluded_domains": "DuckMail 禁用域名，逗号分隔。xAI 已确认拒绝 duckmail.sbs；流程遇到明确域名拒绝时会在同一任务内自动切换。",
+  "duckmail_excluded_domains": "duckmail.sbs",
   "// yyds_api_key / yyds_jwt": "备用邮箱通道凭证",
   "yyds_api_key": "",
   "yyds_jwt": "",

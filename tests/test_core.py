@@ -213,6 +213,71 @@ class CoreBehaviorTestCase(unittest.TestCase):
         finally:
             reg.config = previous
 
+    def test_duckmail_domain_selection_skips_rejected_domains(self):
+        previous = dict(reg.config)
+        reg.config = {"duckmail_excluded_domains": "duckmail.sbs"}
+        try:
+            with patch.object(
+                reg,
+                "get_domains",
+                return_value=[
+                    {"domain": "duckmail.sbs", "isVerified": True, "ownerId": None},
+                    {"domain": "baldur.edu.kg", "isVerified": True, "ownerId": None},
+                ],
+            ):
+                self.assertEqual(reg.pick_domain(), "baldur.edu.kg")
+        finally:
+            reg.config = previous
+
+    def test_duckmail_rejection_rotates_domain_in_same_registration(self):
+        previous = dict(reg.config)
+        reg.config = {
+            "email_provider": "duckmail",
+            "email_form_timeout": 1,
+            "email_submit_confirm_timeout": 1,
+        }
+        page = unittest.mock.Mock()
+        created = unittest.mock.Mock()
+        try:
+            with patch.object(reg, "_get_page", return_value=page), patch.object(
+                reg, "_wait_for_email_form", return_value=True
+            ), patch.object(
+                reg,
+                "get_email_and_token",
+                side_effect=[
+                    ("first@duckmail.sbs", "first-token"),
+                    ("second@baldur.edu.kg", "second-token"),
+                ],
+            ) as get_mail, patch.object(
+                reg, "_native_fill_email_and_submit", return_value=True
+            ), patch.object(
+                reg,
+                "_wait_for_email_submission",
+                side_effect=["domain-rejected", True],
+            ), patch.object(
+                reg, "release_email", return_value=True
+            ) as release, patch.object(
+                reg, "_start_email_submit_probe"
+            ), patch.object(
+                reg, "_stop_email_submit_probe"
+            ), patch.object(reg, "dump_state"), patch.object(
+                reg, "take_screenshot"
+            ):
+                result = reg.fill_email_and_submit(timeout=1, on_created=created)
+            self.assertEqual(result, ("second@baldur.edu.kg", "second-token"))
+            release.assert_called_once_with(
+                "first-token",
+                log_callback=None,
+            )
+            self.assertEqual(created.call_count, 2)
+            self.assertEqual(get_mail.call_count, 2)
+            second_excluded = get_mail.call_args_list[1].kwargs[
+                "duckmail_excluded_domains"
+            ]
+            self.assertIn("duckmail.sbs", second_excluded)
+        finally:
+            reg.config = previous
+
     def test_duckmail_accounts_expire_and_are_deleted_after_use(self):
         previous = dict(reg.config)
         reg.config = {

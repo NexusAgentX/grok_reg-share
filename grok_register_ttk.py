@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "email_provider": "cloudmail",
     "duckmail_api_key": "",
     "duckmail_expiry_seconds": 86400,
+    "duckmail_excluded_domains": "duckmail.sbs",
     "moemail_api_base": "https://moemail.app",
     "moemail_api_key": "",
     "moemail_cookie": "",
@@ -1100,18 +1101,36 @@ def generate_username(length=10):
     return "".join(secrets.choice(chars) for _ in range(length))
 
 
-def pick_domain(api_key=None):
+def _duckmail_excluded_domains(extra=None):
+    raw = config.get("duckmail_excluded_domains", "")
+    if isinstance(raw, str):
+        configured = re.split(r"[,，\s]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        configured = raw
+    else:
+        configured = []
+    excluded = {str(item).strip().lower() for item in configured if str(item).strip()}
+    excluded.update(
+        str(item).strip().lower()
+        for item in (extra or ())
+        if str(item).strip()
+    )
+    return excluded
+
+
+def pick_domain(api_key=None, excluded_domains=None):
     domains = get_domains(api_key=api_key)
     if not domains:
         raise Exception("DuckMail 娌℃湁杩斿洖浠讳綍鍙敤鍩熷悕")
-    private = [d for d in domains if d.get("ownerId")]
-    verified_private = [d for d in private if d.get("isVerified")]
-    if verified_private:
-        return verified_private[0]["domain"]
+    excluded = _duckmail_excluded_domains(excluded_domains)
+    private = [d for d in domains if d.get("ownerId") and d.get("isVerified")]
     public = [d for d in domains if d.get("isVerified")]
-    if public:
-        return public[0]["domain"]
-    raise Exception("DuckMail 鏃犲凡楠岃瘉鍩熷悕鍙敤")
+    for group in (private, public):
+        for item in group:
+            domain = str(item.get("domain") or "").strip()
+            if domain and domain.lower() not in excluded:
+                return domain
+    raise Exception("DuckMail 没有未被排除的已验证域名可用")
 
 
 # ──────────────────────── CloudMail (maillab/cloud-mail) ────────────────────────
@@ -1323,7 +1342,12 @@ def get_email_provider():
     return config.get("email_provider", "duckmail")
 
 
-def get_email_and_token(api_key=None, log_callback=None, cancel_callback=None):
+def get_email_and_token(
+    api_key=None,
+    log_callback=None,
+    cancel_callback=None,
+    duckmail_excluded_domains=None,
+):
     provider = str(get_email_provider() or "").strip().lower()
     if provider == "moemail":
         from pure_api.errors import FastRegistrationCancelled
@@ -1383,7 +1407,10 @@ def get_email_and_token(api_key=None, log_callback=None, cancel_callback=None):
                 raise Exception("获取 Cloudflare 邮箱 token 失败")
             return address, token
     key = api_key or get_duckmail_api_key()
-    domain = pick_domain(api_key=key)
+    domain = pick_domain(
+        api_key=key,
+        excluded_domains=duckmail_excluded_domains,
+    )
     username = generate_username(10)
     address = f"{username}@{domain}"
     password = secrets.token_urlsafe(12)
@@ -1993,7 +2020,7 @@ def _wait_for_email_submission(page, timeout, cancel_callback=None):
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
         state = page.run_js(
-            """
+            r"""
 function visible(node) {
   if (!node) return false;
   const s = getComputedStyle(node), r = node.getBoundingClientRect();
@@ -2002,11 +2029,19 @@ function visible(node) {
 const email = [...document.querySelectorAll('input[type="email"], input[name="email"]')].find(visible);
 const code = [...document.querySelectorAll('input[autocomplete="one-time-code"], input[name="code"], input[data-input-otp="true"]')].find(visible);
 const profile = [...document.querySelectorAll('input[type="password"], input[name="givenName"]')].find(visible);
-return {emailVisible: !!email, advanced: !!code || !!profile};
+const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').toLowerCase();
+const domainRejected = (
+  bodyText.includes('email domain') &&
+  bodyText.includes('has been rejected') &&
+  bodyText.includes('different email address')
+);
+return {emailVisible: !!email, advanced: !!code || !!profile, domainRejected};
             """
         ) or {}
         if state.get("advanced") or not state.get("emailVisible"):
             return True
+        if state.get("domainRejected"):
+            return "domain-rejected"
         human_sleep(0.25, cancel_callback)
     return False
 
@@ -2411,16 +2446,43 @@ def fill_email_and_submit(
         cancel_callback=cancel_callback,
     ):
         raise Exception("邮箱注册表单未在限定时间内出现")
-    email, dev_token = get_email_and_token(
-        log_callback=log_callback,
-        cancel_callback=cancel_callback,
-    )
-    if not email or not dev_token:
-        raise Exception("鑾峰彇閭澶辫触")
-    if on_created is not None:
-        on_created(email, dev_token)
-    if log_callback:
-        log_callback(f"[*] 宸插垱寤洪偖绠? {email}")
+    rejected_domains = set()
+
+    def create_mailbox():
+        created_email, created_token = get_email_and_token(
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            duckmail_excluded_domains=rejected_domains,
+        )
+        if not created_email or not created_token:
+            raise Exception("鑾峰彇閭澶辫触")
+        if on_created is not None:
+            on_created(created_email, created_token)
+        if log_callback:
+            log_callback(f"[*] 宸插垱寤洪偖绠? {created_email}")
+        return created_email, created_token
+
+    def replace_rejected_duckmail(current_email, current_token):
+        if str(get_email_provider() or "").strip().lower() != "duckmail":
+            raise Exception("xAI 拒绝了当前邮箱域名，请更换邮箱服务商")
+        domain = str(current_email or "").rsplit("@", 1)[-1].strip().lower()
+        if domain:
+            rejected_domains.add(domain)
+        _stop_email_submit_probe(page)
+        release_email(current_token, log_callback=log_callback)
+        if log_callback:
+            log_callback(f"[mail] xAI 已拒绝域名 {domain or 'unknown'}，尝试下一个 DuckMail 域名")
+        try:
+            replacement = create_mailbox()
+        except Exception as exc:
+            rejected = ", ".join(sorted(rejected_domains)) or "unknown"
+            raise Exception(
+                f"xAI 已拒绝 DuckMail 域名 {rejected}；没有其他可用公共域名"
+            ) from exc
+        _start_email_submit_probe(page)
+        return replacement
+
+    email, dev_token = create_mailbox()
     _start_email_submit_probe(page)
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -2436,13 +2498,18 @@ def fill_email_and_submit(
             confirm_timeout = float(
                 config.get("email_submit_confirm_timeout", 30) or 30
             )
-            if _wait_for_email_submission(
+            submission_state = _wait_for_email_submission(
                 page,
                 confirm_timeout,
                 cancel_callback=cancel_callback,
-            ):
+            )
+            if submission_state is True:
                 _stop_email_submit_probe(page)
                 return email, dev_token
+            if submission_state == "domain-rejected":
+                email, dev_token = replace_rejected_duckmail(email, dev_token)
+                deadline = time.time() + timeout
+                continue
             raise _email_submit_timeout_error(page)
 
         filled = page.run_js(
@@ -2533,13 +2600,18 @@ return true;
             confirm_timeout = float(
                 config.get("email_submit_confirm_timeout", 30) or 30
             )
-            if _wait_for_email_submission(
+            submission_state = _wait_for_email_submission(
                 page,
                 confirm_timeout,
                 cancel_callback=cancel_callback,
-            ):
+            )
+            if submission_state is True:
                 _stop_email_submit_probe(page)
                 return email, dev_token
+            if submission_state == "domain-rejected":
+                email, dev_token = replace_rejected_duckmail(email, dev_token)
+                deadline = time.time() + timeout
+                continue
             raise _email_submit_timeout_error(page)
         human_sleep(0.5, cancel_callback)
     raise _email_submit_timeout_error(page)
