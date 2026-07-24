@@ -3501,17 +3501,37 @@ def open_login_page(log_callback=None, cancel_callback=None):
     human_sleep(2, cancel_callback)
     if log_callback:
         log_callback(f"[*] 当前URL: {page.url}")
-    # 点击「使用邮箱登录」
-    clicked = page.run_js("""
-const btn = document.querySelector('button[data-testid="continue-with-email"]');
-if (btn) { btn.click(); return 'clicked'; }
+    # 点击「使用邮箱登录 / Login with email」
+    clicked = page.run_js(r"""
+function vis(n){
+  if(!n) return false;
+  const s=getComputedStyle(n), r=n.getBoundingClientRect();
+  return s.display!=='none' && s.visibility!=='hidden' && r.width>0 && r.height>0;
+}
+const byTestId = document.querySelector(
+  'button[data-testid="continue-with-email"], button[data-testid="login-with-email"], button[data-testid="sign-in-with-email"]'
+);
+if (byTestId && vis(byTestId)) { byTestId.click(); return 'clicked-testid'; }
+const btn = [...document.querySelectorAll('button, a, [role="button"]')].find((node) => {
+  if (!vis(node) || node.disabled) return false;
+  const t = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return (
+    t === 'login with email' ||
+    t === 'log in with email' ||
+    t === 'sign in with email' ||
+    t === 'continue with email' ||
+    t.includes('使用邮箱登录') ||
+    t.includes('邮箱登录')
+  );
+});
+if (btn) { btn.click(); return 'clicked-text'; }
 return 'not-found';
 """)
-    if clicked != 'clicked':
-        raise Exception("未找到「使用邮箱登录」按钮")
+    if not str(clicked or "").startswith("clicked"):
+        raise Exception("未找到「使用邮箱登录 / Login with email」按钮")
     human_sleep(2, cancel_callback)
     if log_callback:
-        log_callback("[*] 已点击「使用邮箱登录」")
+        log_callback("[*] 已点击「使用邮箱登录 / Login with email」")
 
 
 def fill_login_and_submit(email, password, timeout=120, log_callback=None, cancel_callback=None):

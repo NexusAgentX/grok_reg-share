@@ -1068,9 +1068,41 @@ def approve_device_code(
             _dismiss_cookie_banner(page, log)
             _sleep(0.4)
 
-        # Sign-in chooser
-        if "使用邮箱登录" in text or "Continue with email" in text:
-            if _click_exact(page, ["使用邮箱登录", "Continue with email", "Sign in with email"], log, real=False):
+        # Sign-in chooser (xAI currently labels this "Login with email")
+        if (
+            "使用邮箱登录" in text
+            or "Continue with email" in text
+            or "Sign in with email" in text
+            or "Login with email" in text
+            or "Log in with email" in text
+            or ("sign-in" in url and "email" in text.lower() and "password" not in text.lower())
+        ):
+            clicked = _click_exact(
+                page,
+                [
+                    "使用邮箱登录",
+                    "Login with email",
+                    "Log in with email",
+                    "Sign in with email",
+                    "Continue with email",
+                ],
+                log,
+                real=False,
+            )
+            if not clicked:
+                try:
+                    el = (
+                        page.ele('css:button[data-testid="continue-with-email"]', timeout=0.4)
+                        or page.ele('css:button[data-testid="login-with-email"]', timeout=0.3)
+                        or page.ele('css:button[data-testid="sign-in-with-email"]', timeout=0.3)
+                    )
+                    if el:
+                        el.click(by_js=True)
+                        clicked = "data-testid-email"
+                        log("clicked email login via data-testid")
+                except Exception as e:
+                    log(f"email login testid click failed: {e}")
+            if clicked:
                 _sleep(1.5)
                 phase = "email"
                 continue
@@ -1081,7 +1113,7 @@ def approve_device_code(
         ):
             phase = "email"
             _fill(page, "css:input[type='email']", email, log, "email")
-            if _click_exact(page, ["下一步", "Next", "Continue", "继续"], log, real=False):
+            if _click_exact(page, ["下一步", "Next", "Continue", "继续", "Login", "Log in", "Sign in"], log, real=False):
                 _sleep(1.8)
                 continue
 
@@ -1113,7 +1145,12 @@ def approve_device_code(
                 raise_on_timeout=False,
             )
             # REAL click login helps form submit
-            if not _click_exact(page, ["登录", "Sign in", "Log in"], log, real=True):
+            if not _click_exact(
+                page,
+                ["登录", "Sign in", "Log in", "Login", "Continue"],
+                log,
+                real=True,
+            ):
                 try:
                     el = page.ele("css:button[type='submit']", timeout=0.5) or page.ele(
                         "css:button[data-testid='sign-in-submit']", timeout=0.5
