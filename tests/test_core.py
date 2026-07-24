@@ -89,6 +89,28 @@ class CoreBehaviorTestCase(unittest.TestCase):
         register_one.assert_not_called()
         stop_browser.assert_called_once()
 
+    def test_email_signup_click_waits_for_form_transition(self):
+        page = unittest.mock.Mock()
+        page.run_js.return_value = True
+        with patch.object(reg, "_get_page", return_value=page), patch.object(
+            reg, "_email_form_is_ready", return_value=False
+        ), patch.object(reg, "_wait_for_email_form", return_value=True) as wait:
+            self.assertTrue(reg.click_email_signup_button(timeout=1))
+        wait.assert_called_once_with(
+            page,
+            unittest.mock.ANY,
+            cancel_callback=None,
+        )
+
+    def test_email_form_is_ready_before_mailbox_is_created(self):
+        page = unittest.mock.Mock()
+        with patch.object(reg, "_get_page", return_value=page), patch.object(
+            reg, "_wait_for_email_form", return_value=False
+        ), patch.object(reg, "get_email_and_token") as create:
+            with self.assertRaisesRegex(Exception, "邮箱注册表单未在限定时间内出现"):
+                reg.fill_email_and_submit(timeout=1)
+        create.assert_not_called()
+
     def test_cpa_writer_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as tmp:
             payload = build_cpa_xai_auth(

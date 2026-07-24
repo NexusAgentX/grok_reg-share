@@ -1880,24 +1880,70 @@ def refresh_active_page():
     return _get_page()
 
 
+def _email_form_is_ready(page):
+    if page is None:
+        return False
+    try:
+        return bool(
+            page.run_js(
+                r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+        style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+}
+return Array.from(document.querySelectorAll(
+    'input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"]'
+)).some((node) => isVisible(node) && !node.disabled && !node.readOnly);
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def _wait_for_email_form(page, timeout, cancel_callback=None):
+    deadline = time.time() + max(0.0, float(timeout or 0))
+    while True:
+        raise_if_cancelled(cancel_callback)
+        if _email_form_is_ready(page):
+            return True
+        if time.time() >= deadline:
+            return False
+        sleep_with_cancel(min(0.25, max(0.0, deadline - time.time())), cancel_callback)
+
+
 def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=None):
     page = _get_page()
     deadline = time.time() + timeout
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+        if _email_form_is_ready(page):
+            return True
         if log_callback:
             log_callback("[Debug] 尝试查找“使用邮箱注册”按钮...")
 
         clicked = page.run_js(r"""
+function isVisible(node) {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+        style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+}
 const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
 const target = candidates.find((node) => {
     const text = (node.innerText || node.textContent || '').replace(/\s+/g, '');
     const lower = text.toLowerCase();
-    return (
+    return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true' && (
         text.includes('使用邮箱注册') ||
+        text.includes('使用邮箱') ||
+        text.includes('邮箱注册') ||
         lower.includes('signupwithemail') ||
         lower.includes('continuewithemail') ||
-        lower.includes('email')
+        lower.includes('useemail')
     );
 });
 if (!target) {
@@ -1909,9 +1955,17 @@ return true;
 
         if clicked:
             if log_callback:
-                log_callback("[*] 已点击「使用邮箱注册」按钮")
-            human_sleep(2, cancel_callback)
-            return True
+                log_callback("[*] 已点击「使用邮箱注册」按钮，等待邮箱表单")
+            form_timeout = float(config.get("email_form_timeout", 30) or 30)
+            if _wait_for_email_form(
+                page,
+                form_timeout,
+                cancel_callback=cancel_callback,
+            ):
+                if log_callback:
+                    log_callback("[*] 邮箱注册表单已就绪")
+                return True
+            raise Exception("点击「使用邮箱注册」后邮箱表单未在限定时间内出现")
 
         if log_callback:
             current_url = page.url if page else "none"
@@ -1991,6 +2045,12 @@ def fill_email_and_submit(
         timeout = float(config.get("email_form_timeout", 20) or 20)
     page = _get_page()
     raise_if_cancelled(cancel_callback)
+    if not _wait_for_email_form(
+        page,
+        timeout,
+        cancel_callback=cancel_callback,
+    ):
+        raise Exception("邮箱注册表单未在限定时间内出现")
     email, dev_token = get_email_and_token(
         log_callback=log_callback,
         cancel_callback=cancel_callback,
