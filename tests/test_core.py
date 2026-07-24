@@ -117,6 +117,8 @@ class CoreBehaviorTestCase(unittest.TestCase):
         with patch.object(reg, "_get_page", return_value=page), patch.object(
             reg, "_wait_for_email_form", return_value=True
         ), patch.object(
+            reg, "_native_fill_email_and_submit", return_value=False
+        ), patch.object(
             reg,
             "get_email_and_token",
             return_value=("temporary@duck.test", "mailbox-token"),
@@ -125,6 +127,29 @@ class CoreBehaviorTestCase(unittest.TestCase):
         ), patch.object(reg, "take_screenshot"):
             result = reg.fill_email_and_submit(timeout=1)
         self.assertEqual(result, ("temporary@duck.test", "mailbox-token"))
+
+    def test_native_email_submit_uses_browser_input_and_click(self):
+        email = "temporary@duck.test"
+        email_input = unittest.mock.Mock()
+        email_input.states.is_displayed = True
+        email_input.attr.side_effect = lambda name: {
+            "disabled": None,
+            "aria-disabled": None,
+        }.get(name)
+        email_input.property.return_value = email
+        submit = unittest.mock.Mock()
+        submit.states.is_displayed = True
+        submit.attr.side_effect = lambda name: {
+            "disabled": None,
+            "aria-disabled": None,
+        }.get(name)
+        page = unittest.mock.Mock()
+        page.ele.side_effect = [email_input, submit]
+        with patch.object(reg, "human_sleep"):
+            self.assertTrue(reg._native_fill_email_and_submit(page, email))
+        email_input.clear.assert_called_once()
+        email_input.input.assert_called_once_with(email)
+        submit.click.assert_called_once()
 
     def test_cpa_writer_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1915,6 +1915,92 @@ def _wait_for_email_form(page, timeout, cancel_callback=None):
         sleep_with_cancel(min(0.25, max(0.0, deadline - time.time())), cancel_callback)
 
 
+def _native_element_is_usable(element):
+    if element is None:
+        return False
+    try:
+        if not element.states.is_displayed:
+            return False
+    except Exception:
+        pass
+    try:
+        if element.attr("disabled") is not None:
+            return False
+        if str(element.attr("aria-disabled") or "").lower() == "true":
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _native_fill_email_and_submit(
+    page,
+    email,
+    log_callback=None,
+    cancel_callback=None,
+):
+    """Use DrissionPage input/click events so React navigation cannot hide a JS return."""
+    try:
+        raise_if_cancelled(cancel_callback)
+        email_input = None
+        for selector in (
+            'css:input[type="email"]',
+            'css:input[name="email"]',
+            'css:input[autocomplete="email"]',
+            'css:input[data-testid="email"]',
+        ):
+            candidate = page.ele(selector, timeout=0.2)
+            if _native_element_is_usable(candidate):
+                email_input = candidate
+                break
+        if email_input is None:
+            return False
+
+        email_input.click()
+        email_input.clear()
+        email_input.input(email)
+        human_sleep(0.5, cancel_callback)
+        if str(email_input.property("value") or "").strip() != email:
+            return False
+
+        submit_button = page.ele('css:button[type="submit"]', timeout=0.5)
+        if not _native_element_is_usable(submit_button):
+            return False
+        submit_button.click()
+        if log_callback:
+            log_callback("[*] 已通过原生浏览器事件填写邮箱并点击注册")
+        return True
+    except RegistrationCancelled:
+        raise
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] 原生邮箱输入或点击失败，回退页面脚本: {exc}")
+        return False
+
+
+def _wait_for_email_submission(page, timeout, cancel_callback=None):
+    deadline = time.time() + max(0.0, float(timeout or 0))
+    while time.time() < deadline:
+        raise_if_cancelled(cancel_callback)
+        state = page.run_js(
+            """
+function visible(node) {
+  if (!node) return false;
+  const s = getComputedStyle(node), r = node.getBoundingClientRect();
+  return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+}
+const email = [...document.querySelectorAll('input[type="email"], input[name="email"]')].find(visible);
+const code = [...document.querySelectorAll('input[autocomplete="one-time-code"], input[name="code"], input[data-input-otp="true"]')].find(visible);
+const profile = [...document.querySelectorAll('input[type="password"], input[name="givenName"]')].find(visible);
+return {emailVisible: !!email, advanced: !!code || !!profile};
+            """
+        ) or {}
+        if state.get("advanced") or not state.get("emailVisible"):
+            return True
+        human_sleep(0.25, cancel_callback)
+    return False
+
+
 def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=None):
     page = _get_page()
     deadline = time.time() + timeout
@@ -2064,6 +2150,25 @@ def fill_email_and_submit(
     deadline = time.time() + timeout
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+        if _native_fill_email_and_submit(
+            page,
+            email,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+        ):
+            dump_state(page, "email-submitted")
+            take_screenshot(page, "email-submitted")
+            confirm_timeout = float(
+                config.get("email_submit_confirm_timeout", 30) or 30
+            )
+            if _wait_for_email_submission(
+                page,
+                confirm_timeout,
+                cancel_callback=cancel_callback,
+            ):
+                return email, dev_token
+            raise Exception("提交邮箱后页面未在限定时间内进入下一步")
+
         filled = page.run_js(
             """
 const email = arguments[0];
@@ -2149,27 +2254,15 @@ return true;
                 log_callback(f"[*] 已填写邮箱并点击注册: {email}")
             dump_state(page, "email-submitted")
             take_screenshot(page, "email-submitted")
-            confirm_deadline = time.time() + float(
+            confirm_timeout = float(
                 config.get("email_submit_confirm_timeout", 30) or 30
             )
-            while time.time() < confirm_deadline:
-                raise_if_cancelled(cancel_callback)
-                state = page.run_js(
-                    """
-function visible(node) {
-  if (!node) return false;
-  const s = getComputedStyle(node), r = node.getBoundingClientRect();
-  return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
-}
-const email = [...document.querySelectorAll('input[type="email"], input[name="email"]')].find(visible);
-const code = [...document.querySelectorAll('input[autocomplete="one-time-code"], input[name="code"], input[data-input-otp="true"]')].find(visible);
-const profile = [...document.querySelectorAll('input[type="password"], input[name="givenName"]')].find(visible);
-return {emailVisible: !!email, advanced: !!code || !!profile};
-                    """
-                ) or {}
-                if state.get("advanced") or not state.get("emailVisible"):
-                    return email, dev_token
-                human_sleep(0.25, cancel_callback)
+            if _wait_for_email_submission(
+                page,
+                confirm_timeout,
+                cancel_callback=cancel_callback,
+            ):
+                return email, dev_token
             raise Exception("提交邮箱后页面未在限定时间内进入下一步")
         human_sleep(0.5, cancel_callback)
     raise Exception("未找到邮箱输入框或注册按钮")
