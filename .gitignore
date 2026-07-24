@@ -18,5 +18,6 @@ browser-data/
 cpa_auths/
 cookies/
 screenshots/
+diagnostics/
 *.log
 *.bak

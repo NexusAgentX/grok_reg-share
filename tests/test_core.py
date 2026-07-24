@@ -122,6 +122,8 @@ class CoreBehaviorTestCase(unittest.TestCase):
             reg,
             "get_email_and_token",
             return_value=("temporary@duck.test", "mailbox-token"),
+        ), patch.object(reg, "_start_email_submit_probe"), patch.object(
+            reg, "_stop_email_submit_probe"
         ), patch.object(reg, "human_sleep"), patch.object(
             reg, "dump_state"
         ), patch.object(reg, "take_screenshot"):
@@ -136,11 +138,26 @@ class CoreBehaviorTestCase(unittest.TestCase):
             "emailValid": True,
             "errors": ["Something went wrong"],
         }
-        message = str(reg._email_submit_timeout_error(page))
+        with patch.object(
+            reg, "_collect_email_submit_network", return_value=[]
+        ), patch.object(
+            reg, "_collect_email_submit_console", return_value=[]
+        ), patch.object(
+            reg, "_capture_email_submit_failure_screenshot", return_value=None
+        ), patch.object(
+            reg, "_write_email_submit_diagnostic", return_value=None
+        ), patch.object(reg, "_stop_email_submit_probe"):
+            message = str(reg._email_submit_timeout_error(page))
         self.assertIn("Something went wrong", message)
         self.assertNotIn("temporary@duck.test", message)
 
-    def test_native_email_submit_uses_browser_input_and_click(self):
+        redacted = reg._redact_diagnostic_text(
+            "failed for temporary@duck.test token abcdefghijklmnopqrstuvwxyz1234567890"
+        )
+        self.assertNotIn("temporary@duck.test", redacted)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyz1234567890", redacted)
+
+    def test_native_email_submit_uses_browser_input_and_request_submit(self):
         email = "temporary@duck.test"
         email_input = unittest.mock.Mock()
         email_input.states.is_displayed = True

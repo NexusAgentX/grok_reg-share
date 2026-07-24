@@ -2011,6 +2011,202 @@ return {emailVisible: !!email, advanced: !!code || !!profile};
     return False
 
 
+def _start_email_submit_probe(page):
+    """Capture submit events, completed POSTs, and console errors without request secrets."""
+    try:
+        page.listen.start(targets=True, method=("POST",), res_type=True)
+    except Exception:
+        pass
+    try:
+        page.console.start()
+    except Exception:
+        pass
+    try:
+        page.run_js(
+            r"""
+if (!window.__grokEmailSubmitProbe) {
+  const probe = window.__grokEmailSubmitProbe = {
+    clickEvents: 0,
+    submitEvents: 0,
+    invalidEvents: 0,
+    formDataEvents: 0,
+    lastSubmitDefaultPrevented: null
+  };
+  document.addEventListener('click', event => {
+    const button = event.target?.closest?.('button[type="submit"], input[type="submit"]');
+    if (button) probe.clickEvents += 1;
+  }, true);
+  document.addEventListener('submit', event => {
+    probe.submitEvents += 1;
+    window.setTimeout(() => {
+      probe.lastSubmitDefaultPrevented = !!event.defaultPrevented;
+    }, 0);
+  }, true);
+  document.addEventListener('invalid', () => {
+    probe.invalidEvents += 1;
+  }, true);
+  document.addEventListener('formdata', () => {
+    probe.formDataEvents += 1;
+  }, true);
+}
+return true;
+            """
+        )
+    except Exception:
+        pass
+
+
+def _stop_email_submit_probe(page):
+    try:
+        if page.listen.listening:
+            page.listen.stop()
+    except Exception:
+        pass
+    try:
+        if page.console.listening:
+            page.console.stop()
+    except Exception:
+        pass
+
+
+def _redact_diagnostic_text(value):
+    text = str(value or "")[:500]
+    text = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "[redacted-email]", text)
+    text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "[redacted-token]", text)
+    return text[:200]
+
+
+def _structured_error_messages(value, limit=5):
+    messages = []
+
+    def visit(node, depth=0):
+        if depth > 4 or len(messages) >= limit:
+            return
+        if isinstance(node, dict):
+            for key, item in node.items():
+                if str(key).lower() in {"error", "message", "detail", "reason", "description"}:
+                    if isinstance(item, (str, int, float, bool)):
+                        text = _redact_diagnostic_text(item)
+                        if text and text not in messages:
+                            messages.append(text)
+                visit(item, depth + 1)
+        elif isinstance(node, list):
+            for item in node[:10]:
+                visit(item, depth + 1)
+
+    visit(value)
+    return messages[:limit]
+
+
+def _collect_email_submit_network(page):
+    packets = []
+    try:
+        if page.listen.listening:
+            caught = page.listen.wait(
+                count=1000,
+                timeout=0.05,
+                fit_count=False,
+                raise_err=False,
+            )
+            if caught:
+                packets = caught if isinstance(caught, list) else [caught]
+    except Exception:
+        packets = []
+
+    summaries = []
+    from urllib.parse import urlsplit
+
+    for packet in packets[:50]:
+        try:
+            parsed = urlsplit(str(packet.url or ""))
+            summary = {
+                "host": parsed.hostname or "",
+                "path": parsed.path[:200],
+                "method": str(packet.method or ""),
+                "resourceType": str(packet.resourceType or ""),
+                "failed": bool(packet.is_failed),
+            }
+            if packet.is_failed:
+                summary["failure"] = _redact_diagnostic_text(
+                    getattr(packet.fail_info, "errorText", "")
+                )
+            else:
+                summary["status"] = int(getattr(packet.response, "status", 0) or 0)
+                body = packet.response.body
+                summary["errors"] = _structured_error_messages(body)
+            summaries.append(summary)
+        except Exception as exc:
+            summaries.append({"packetError": type(exc).__name__})
+    return summaries
+
+
+def _collect_email_submit_console(page):
+    summaries = []
+    try:
+        messages = page.console.messages
+    except Exception:
+        messages = []
+    from urllib.parse import urlsplit
+
+    for message in messages[:50]:
+        level = str(getattr(message, "level", "") or "").lower()
+        if level not in {"error", "warning"}:
+            continue
+        parsed = urlsplit(str(getattr(message, "url", "") or ""))
+        summaries.append(
+            {
+                "level": level,
+                "text": _redact_diagnostic_text(getattr(message, "text", "")),
+                "host": parsed.hostname or "",
+                "path": parsed.path[:200],
+            }
+        )
+    return summaries[:20]
+
+
+def _capture_email_submit_failure_screenshot(page):
+    try:
+        directory = os.path.join(DATA_DIR, "diagnostics")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
+        filename = (
+            datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            + "-signup-email-"
+            + secrets.token_hex(4)
+            + ".png"
+        )
+        path = os.path.join(directory, filename)
+        page.get_screenshot(path=path)
+        os.chmod(path, 0o600)
+        return path
+    except Exception:
+        return None
+
+
+def _write_email_submit_diagnostic(payload):
+    try:
+        directory = os.path.join(DATA_DIR, "diagnostics")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
+        filename = (
+            datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            + "-signup-email-"
+            + secrets.token_hex(4)
+            + ".json"
+        )
+        path = os.path.join(directory, filename)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(path, 0o600)
+        return path
+    except Exception:
+        return None
+
+
 def _email_submission_diagnostics(page):
     """Return bounded, non-credential page state for a failed email submission."""
     try:
@@ -2048,7 +2244,8 @@ return {
   challengeFields: challengeFields.length,
   challengeTokenLength: challengeFields.reduce((n, field) => Math.max(n, (field.value || '').length), 0),
   humanVerificationText: bodyText.includes('verify you are human') || bodyText.includes('verifying you are human') || bodyText.includes('人机验证'),
-  errors: errorTexts
+  errors: errorTexts,
+  events: window.__grokEmailSubmitProbe || null
 };
             """
         ) or {}
@@ -2058,9 +2255,23 @@ return {
 
 def _email_submit_timeout_error(page):
     diagnostics = _email_submission_diagnostics(page)
+    diagnostics["network"] = _collect_email_submit_network(page)
+    diagnostics["console"] = _collect_email_submit_console(page)
+    screenshot_path = _capture_email_submit_failure_screenshot(page)
+    diagnostics["screenshot"] = os.path.basename(screenshot_path) if screenshot_path else None
+    diagnostic_path = _write_email_submit_diagnostic(diagnostics)
+    _stop_email_submit_probe(page)
+    summary = {
+        "path": diagnostics.get("path"),
+        "events": diagnostics.get("events"),
+        "network": diagnostics.get("network"),
+        "errors": diagnostics.get("errors"),
+        "console": diagnostics.get("console"),
+        "diagnosticFile": os.path.basename(diagnostic_path) if diagnostic_path else None,
+    }
     return Exception(
         "提交邮箱后页面未在限定时间内进入下一步; diagnostic="
-        + json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
     )
 
 
@@ -2210,6 +2421,7 @@ def fill_email_and_submit(
         on_created(email, dev_token)
     if log_callback:
         log_callback(f"[*] 宸插垱寤洪偖绠? {email}")
+    _start_email_submit_probe(page)
     deadline = time.time() + timeout
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -2229,6 +2441,7 @@ def fill_email_and_submit(
                 confirm_timeout,
                 cancel_callback=cancel_callback,
             ):
+                _stop_email_submit_probe(page)
                 return email, dev_token
             raise _email_submit_timeout_error(page)
 
@@ -2325,10 +2538,11 @@ return true;
                 confirm_timeout,
                 cancel_callback=cancel_callback,
             ):
+                _stop_email_submit_probe(page)
                 return email, dev_token
             raise _email_submit_timeout_error(page)
         human_sleep(0.5, cancel_callback)
-    raise Exception("未找到邮箱输入框或注册按钮")
+    raise _email_submit_timeout_error(page)
 
 
 def fill_code_and_submit(email, dev_token, timeout=None, log_callback=None, cancel_callback=None):
