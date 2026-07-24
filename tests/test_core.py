@@ -155,13 +155,15 @@ class CoreBehaviorTestCase(unittest.TestCase):
             "disabled": None,
             "aria-disabled": None,
         }.get(name)
+        submit.run_js.return_value = True
         page = unittest.mock.Mock()
         page.ele.side_effect = [email_input, submit]
         with patch.object(reg, "human_sleep"):
             self.assertTrue(reg._native_fill_email_and_submit(page, email))
         email_input.clear.assert_called_once()
         email_input.input.assert_called_once_with(email)
-        submit.click.assert_called_once()
+        submit.run_js.assert_called_once()
+        submit.click.assert_not_called()
 
     def test_cpa_writer_is_atomic_and_private(self):
         with tempfile.TemporaryDirectory() as tmp:

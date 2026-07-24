@@ -1966,9 +1966,19 @@ def _native_fill_email_and_submit(
         submit_button = page.ele('css:button[type="submit"]', timeout=0.5)
         if not _native_element_is_usable(submit_button):
             return False
-        submit_button.click()
+        scheduled = submit_button.run_js(
+            """
+const button = this;
+const form = button.form || button.closest('form');
+if (!form) return false;
+window.setTimeout(() => form.requestSubmit(button), 0);
+return true;
+            """
+        )
+        if not scheduled:
+            return False
         if log_callback:
-            log_callback("[*] 已通过原生浏览器事件填写邮箱并点击注册")
+            log_callback("[*] 已通过原生输入和 requestSubmit 提交邮箱表单")
         return True
     except RegistrationCancelled:
         raise
