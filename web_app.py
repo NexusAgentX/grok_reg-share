@@ -312,8 +312,16 @@ def _run_registration(extra: int, threads: int, registration_mode: str):
         mint_workers = cli.resolve_mint_workers(cli_value=-1, threads=threads, config=cfg, inline_mint=False)
         do_mint_inline = mint_workers == 0
         mint_qmax = cli.resolve_mint_queue_max(cfg, mint_workers)
-        reg.configure_perf(fast=True, sleep_scale=0.15, skip_debug_io=True,
-            cookie_snapshot=False, async_side_effects=True, browser_reuse=True, browser_recycle_every=25)
+        # Keep debug IO on so failed profile/email stages can dump page state.
+        reg.configure_perf(
+            fast=True,
+            sleep_scale=0.15,
+            skip_debug_io=False,
+            cookie_snapshot=False,
+            async_side_effects=True,
+            browser_reuse=True,
+            browser_recycle_every=25,
+        )
         done_count = 0
         af = str(ACCOUNTS_FILE)
         if os.path.exists(af):

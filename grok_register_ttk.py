@@ -2618,7 +2618,7 @@ const submitButton = buttons.find((node) => {
     return (
         text === '注册' ||
         text.includes('注册') ||
-        lower.includes('sign up') ||
+        lower.includes('signup') ||
         lower.includes('continue') ||
         lower.includes('next')
     );
@@ -2992,13 +2992,22 @@ const ok3 = setInputValue(passwordInput, password);
 
 if (!ok1 || !ok2 || !ok3) return 'fill-failed';
 
+function isProfileSubmitText(raw) {
+    const t = String(raw || '').replace(/\\s+/g, '').toLowerCase();
+    if (!t) return false;
+    if (t.includes('完成注册') || t.includes('创建账户') || t.includes('创建账号')) return true;
+    if (t.includes('createaccount') || t.includes('createyouraccount')) return true;
+    if (t.includes('completesignup') || t.includes('completeyoursignup')) return true;
+    if (t.includes('complete') && t.includes('signup')) return true;
+    return t === 'signup';
+}
+
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
 });
-const submitBtn = buttons.find((node) => {
-    const t = (node.innerText || node.textContent || '').replace(/\\s+/g, '').toLowerCase();
-    return t.includes('完成注册') || t.includes('创建账户') || t.includes('sign up') || t.includes('createaccount');
-});
+const submitBtn = buttons.find((node) => isProfileSubmitText(node.innerText || node.textContent || ''))
+  || buttons.find((node) => String(node.getAttribute('type') || '').toLowerCase() === 'submit')
+  || null;
 
 // 必须等待 Cloudflare 校验通过后再提交
 const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
@@ -3010,7 +3019,7 @@ if (cfPresent) {
     if (!solvedByToken) return 'wait-cloudflare:' + token.length;
 }
 
-if (submitBtn) {
+if (submitBtn || passwordInput.form) {
     return 'ready-to-submit';
 }
 return 'filled-no-submit';
@@ -3078,6 +3087,16 @@ function isVisible(node) {
     return rect.width > 0 && rect.height > 0;
 }
 
+function isProfileSubmitText(raw) {
+    const t = String(raw || '').replace(/\s+/g, '').toLowerCase();
+    if (!t) return false;
+    if (t.includes('完成注册') || t.includes('创建账户') || t.includes('创建账号')) return true;
+    if (t.includes('createaccount') || t.includes('createyouraccount')) return true;
+    if (t.includes('completesignup') || t.includes('completeyoursignup')) return true;
+    if (t.includes('complete') && t.includes('signup')) return true;
+    return t === 'signup';
+}
+
 const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
 const cfPresent = !!cfInput
   || !!document.querySelector('iframe[src*="turnstile"], div.cf-turnstile, [data-sitekey], script[src*="turnstile"]');
@@ -3090,13 +3109,28 @@ if (cfPresent) {
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
 });
-const submitBtn = buttons.find((node) => {
-    const t = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
-    return t.includes('完成注册') || t.includes('创建账户') || t.includes('sign up') || t.includes('createaccount');
-});
-if (!submitBtn) return 'no-submit-button';
+const submitBtn = buttons.find((node) => isProfileSubmitText(node.innerText || node.textContent || ''))
+  || buttons.find((node) => String(node.getAttribute('type') || '').toLowerCase() === 'submit')
+  || null;
+const form = document.querySelector('form')
+  || document.querySelector('input[type="password"]')?.form
+  || null;
+if (!submitBtn && form && typeof form.requestSubmit === 'function') {
+    try {
+        form.requestSubmit();
+        return 'submitted-via-form';
+    } catch (err) {
+        return 'form-submit-failed:' + String(err && err.message || err || '');
+    }
+}
+if (!submitBtn) {
+    return 'no-submit-button:' + buttons.slice(0, 8).map((node) =>
+      String(node.innerText || node.textContent || node.getAttribute('type') || '').replace(/\s+/g, ' ').trim().slice(0, 40)
+    ).join('|');
+}
 submitBtn.focus();
-submitBtn.click();
+// Return before React navigation can destroy this execution context.
+window.setTimeout(() => submitBtn.click(), 0);
 return 'submitted';
             """
         )
@@ -3137,13 +3171,20 @@ return String(cfInput.value || '').trim().length;
             human_sleep(0.8, cancel_callback)
             continue
 
-        if submit_state == "submitted":
+        if submit_state in ("submitted", "submitted-via-form"):
             if log_callback:
-                log_callback(f"[*] 已填写注册资料并提交: {given_name} {family_name}")
+                how = "form.requestSubmit" if submit_state == "submitted-via-form" else "button.click"
+                log_callback(f"[*] 已填写注册资料并提交({how}): {given_name} {family_name}")
             return {"given_name": given_name, "family_name": family_name, "password": password}
         wait_cf_since = None
-        if submit_state == "no-submit-button" and log_callback:
-            log_callback("[Debug] 未找到提交按钮，继续等待页面稳定...")
+        if isinstance(submit_state, str) and submit_state.startswith("no-submit-button") and log_callback:
+            detail = submit_state.split(":", 1)[1] if ":" in submit_state else ""
+            if detail:
+                log_callback(f"[Debug] 未找到提交按钮，继续等待页面稳定... 可见按钮=[{detail}]")
+            else:
+                log_callback("[Debug] 未找到提交按钮，继续等待页面稳定...")
+        elif isinstance(submit_state, str) and submit_state.startswith("form-submit-failed") and log_callback:
+            log_callback(f"[Debug] form.requestSubmit 失败: {submit_state}")
 
         human_sleep(0.5, cancel_callback)
 
@@ -3307,9 +3348,27 @@ function isVisible(node) {
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
 }
-const titleHit = !!Array.from(document.querySelectorAll('h1,h2,div,span')).find((el) => {
-    const t = (el.textContent || '').replace(/\s+/g, '');
-    return t.includes('完成注册');
+function isProfileSubmitText(raw) {
+    const t = String(raw || '').replace(/\s+/g, '').toLowerCase();
+    if (!t) return false;
+    if (t.includes('完成注册') || t.includes('创建账户') || t.includes('创建账号')) return true;
+    if (t.includes('createaccount') || t.includes('createyouraccount')) return true;
+    if (t.includes('completesignup') || t.includes('completeyoursignup')) return true;
+    if (t.includes('complete') && t.includes('signup')) return true;
+    return t === 'signup';
+}
+function isFinalPageText(raw) {
+    const t = String(raw || '').replace(/\s+/g, '').toLowerCase();
+    return (
+      t.includes('完成注册') ||
+      t.includes('completesignup') ||
+      t.includes('completeyoursignup') ||
+      (t.includes('complete') && t.includes('signup')) ||
+      t.includes('createyouraccount')
+    );
+}
+const titleHit = !!Array.from(document.querySelectorAll('h1,h2,div,span,button')).find((el) => {
+    return isFinalPageText(el.textContent || '');
 });
 if (!titleHit) return 'not-final-page';
 
@@ -3325,18 +3384,33 @@ if (cfPresent) {
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
 });
-const submitBtn = buttons.find((node) => {
-    const t = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
-    return t.includes('完成注册') || t.includes('创建账户') || t.includes('sign up') || t.includes('createaccount');
-});
+const submitBtn = buttons.find((node) => isProfileSubmitText(node.innerText || node.textContent || ''))
+  || buttons.find((node) => String(node.getAttribute('type') || '').toLowerCase() === 'submit')
+  || null;
+const form = document.querySelector('form')
+  || document.querySelector('input[type="password"]')?.form
+  || null;
+if (!submitBtn && form && typeof form.requestSubmit === 'function') {
+    try {
+        form.requestSubmit();
+        return 'final-page-submitted-via-form';
+    } catch (err) {
+        return 'final-page-form-failed';
+    }
+}
 if (!submitBtn) return 'final-page-no-submit';
 submitBtn.focus();
-submitBtn.click();
+window.setTimeout(() => submitBtn.click(), 0);
 return 'final-page-clicked-submit';
                     """
                 )
                 last_submit_retry = now
-                if log_callback and retried in ("final-page-no-submit", "final-page-clicked-submit"):
+                if log_callback and retried in (
+                        "final-page-no-submit",
+                        "final-page-clicked-submit",
+                        "final-page-submitted-via-form",
+                        "final-page-form-failed",
+                    ):
                     log_callback(f"[Debug] 最终页状态: {retried}")
                 if log_callback and isinstance(retried, str) and retried.startswith("final-page-wait-cf"):
                     token_len = retried.split(":", 1)[1] if ":" in retried else "0"

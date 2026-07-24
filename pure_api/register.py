@@ -89,14 +89,14 @@ def _click_any(page, *needles: str) -> bool:
     return bool(
         page.run_js(
             """
-const needles = String(arguments[0]||'').split('||').filter(Boolean).map(s=>s.toLowerCase());
-const extra = ['\\u786e\\u8ba4\\u90ae\\u7bb1','\\u786e\\u8ba4','\\u7ee7\\u7eed','\\u4e0b\\u4e00\\u6b65','\\u5b8c\\u6210\\u6ce8\\u518c','\\u521b\\u5efa\\u8d26\\u6237','\\u6ce8\\u518c'];
+const needles = String(arguments[0]||'').split('||').filter(Boolean).map(s=>s.replace(/\\s+/g,'').toLowerCase());
+const extra = ['\u786e\u8ba4\u90ae\u7bb1','\u786e\u8ba4','\u7ee7\u7eed','\u4e0b\u4e00\u6b65','\u5b8c\u6210\u6ce8\u518c','\u521b\u5efa\u8d26\u6237','\u6ce8\u518c','completesignup','completeyoursignup','createyouraccount','createaccount','signup'];
 for (const x of extra) needles.push(x);
 function vis(n){if(!n)return false;const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden')return false;const r=n.getBoundingClientRect();return r.width>0&&r.height>0}
 const btn=[...document.querySelectorAll('button, [role=button], a')].find(n=>{
   if(!vis(n) || n.disabled) return false;
   const t=(n.innerText||n.textContent||'').replace(/\\s+/g,'').toLowerCase();
-  return needles.some(x=>t.includes(x));
+  return needles.some(x=>x && t.includes(x));
 });
 if(!btn) return false;
 btn.focus(); btn.click();
