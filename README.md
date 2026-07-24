@@ -143,6 +143,20 @@ cp config.example.json config.json
 
 xAI 已确认拒绝 DuckMail 当前两个公共域名 `duckmail.sbs` 和 `baldur.edu.kg`，因此 DuckMail 暂不可用于注册，示例配置默认禁用二者。若 DuckMail 以后增加新公共域名，浏览器流程仍会在页面明确返回域名拒绝后删除本次邮箱并自动尝试下一个未排除域名。
 
+自有域名可部署仓库内的 `workers/grok-mail` Cloudflare Email Worker。它使用共享 Bearer secret 创建短期随机邮箱，并为每个邮箱签发独立 Bearer token；未知收件人会被拒绝，邮件最多保留一小时，注册完成、失败或取消后会主动删除本次邮箱。部署、D1 migration 和 API 契约见 `workers/grok-mail/README.md`。
+
+```json
+{
+  "registration_mode": "browser",
+  "email_provider": "cloudflare",
+  "defaultDomains": "mail.example.com",
+  "cloudflare_api_base": "https://mail-api.example.com",
+  "cloudflare_api_key": "在本地配置，不要提交到 Git",
+  "cloudflare_auth_mode": "bearer",
+  "cloudflare_path_messages": "/api/mails"
+}
+```
+
 Web 控制台可在任务面板逐次选择模式。CLI 可用 `--registration-mode browser|fast|auto` 覆盖配置：
 
 ```bash

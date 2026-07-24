@@ -226,6 +226,70 @@ class CoreBehaviorTestCase(unittest.TestCase):
         finally:
             reg.config = previous
 
+    def test_xai_alphanumeric_code_prefers_subject_and_rejects_css_tokens(self):
+        html = "<style>.per-100{width:100%}</style><p>Confirmation code: LW4-9C8</p>"
+        self.assertEqual(
+            reg.extract_verification_code(
+                html,
+                "SpaceXAI confirmation code: LW4-9C8",
+            ),
+            "LW4-9C8",
+        )
+        self.assertEqual(
+            reg.extract_verification_code(
+                "Verification code is ab1-2cd",
+                "",
+            ),
+            "AB1-2CD",
+        )
+        self.assertIsNone(
+            reg.extract_verification_code(
+                "<style>.per-100{width:100%}</style>",
+                "Newsletter",
+            )
+        )
+
+    def test_cloudflare_worker_create_and_cleanup_use_scoped_bearer_tokens(self):
+        previous = dict(reg.config)
+        reg.config = {
+            "email_provider": "cloudflare",
+            "cloudflare_api_base": "https://mail-api.kagari.test",
+            "cloudflare_api_key": "shared-api-secret",
+            "cloudflare_auth_mode": "bearer",
+            "defaultDomains": "kagari.test",
+            "mail_cleanup_retries": 1,
+        }
+        created = unittest.mock.Mock(status_code=201)
+        created.json.return_value = {
+            "address": "temporary@kagari.test",
+            "jwt": "mailbox-token",
+        }
+        deleted = unittest.mock.Mock(status_code=204)
+        try:
+            with patch.object(reg, "http_post", return_value=created) as post:
+                result = reg.cloudflare_create_temp_address(
+                    "https://mail-api.kagari.test"
+                )
+            self.assertEqual(result, ("temporary@kagari.test", "mailbox-token"))
+            post.assert_called_once_with(
+                "https://mail-api.kagari.test/api/new_address",
+                json={"domain": "kagari.test"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer shared-api-secret",
+                },
+                params={},
+            )
+
+            with patch.object(reg, "http_delete", return_value=deleted) as delete:
+                self.assertTrue(reg.release_email("mailbox-token"))
+            delete.assert_called_once_with(
+                "https://mail-api.kagari.test/api/mailbox",
+                headers={"Authorization": "Bearer mailbox-token"},
+            )
+        finally:
+            reg.config = previous
+
     def test_duckmail_domain_selection_skips_rejected_domains(self):
         previous = dict(reg.config)
         reg.config = {"duckmail_excluded_domains": "duckmail.sbs"}

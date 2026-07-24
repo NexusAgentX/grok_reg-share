@@ -3,7 +3,10 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+node_modules/
 dist/
+workers/grok-mail/.wrangler/
+workers/grok-mail/.dev.vars
 
 # secrets / local runtime
 config.json

@@ -424,7 +424,12 @@ def cloudflare_create_temp_address(api_base):
             _cf_domain_index += 1
     except Exception:
         pass
-    resp = http_post(url, json=payload, headers={"Content-Type": "application/json"})
+    resp = http_post(
+        url,
+        json=payload,
+        headers=cloudflare_build_headers(content_type=True),
+        params=cloudflare_apply_auth_params(),
+    )
     resp.raise_for_status()
     try:
         data = resp.json()
@@ -810,6 +815,24 @@ def delete_duckmail_account(token, log_callback=None):
         return False
 
 
+def cloudflare_delete_temp_address(api_base, token, log_callback=None):
+    if not api_base or not token:
+        return False
+    try:
+        response = http_delete(
+            f"{api_base}/api/mailbox",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if response.status_code == 404:
+            return True
+        response.raise_for_status()
+        return 200 <= int(response.status_code) < 300
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[mail] Cloudflare 临时邮箱清理失败: {exc}")
+        return False
+
+
 def cloudflare_get_domains(api_base, api_key=None):
     headers = cloudflare_build_headers(content_type=False)
     if api_key and "Authorization" in headers:
@@ -1038,7 +1061,7 @@ def yyds_get_email_and_token(api_key=None, jwt=None):
         temp_token = yyds_get_token(address, api_key=key, jwt=token)
     if not temp_token:
         raise Exception("获取 YYDS token 失败")
-    print(f"[*] 已创建 YYDS 邮箱: {address}")
+    print("[*] 已创建 YYDS 邮箱")
     return address, temp_token
 
 
@@ -1090,7 +1113,7 @@ def yyds_get_oai_code(
             code = extract_verification_code(combined, subject)
             if code:
                 if log_callback:
-                    log_callback(f"[*] YYDS 从邮件中提取到验证码: {code}")
+                    log_callback("[*] YYDS 已从邮件中提取验证码")
                 return code
         sleep_with_cancel(poll_interval, cancel_callback)
     raise Exception(f"YYDS 在 {timeout}s 内未收到验证码邮件")
@@ -1330,7 +1353,7 @@ def cloudmail_get_oai_code(
             code = extract_verification_code(combined, subject)
             if code:
                 if log_callback:
-                    log_callback(f"[*] CloudMail 从邮件中提取到验证码: {code}")
+                    log_callback("[*] CloudMail 已从邮件中提取验证码")
                 return code
             elif log_callback:
                 log_callback(f"[Debug] 邮件已解析但未提取到验证码 id={msg_id} attempt={seen_attempts[msg_id]}")
@@ -1435,7 +1458,7 @@ def get_email_and_token(
 def release_email(dev_token, log_callback=None):
     """Return True when deleted, None when no cleanup applies, or False on failure."""
     provider = str(get_email_provider() or "").strip().lower()
-    if provider not in {"moemail", "duckmail"} or not dev_token:
+    if provider not in {"moemail", "duckmail", "cloudflare"} or not dev_token:
         return None
 
     if provider == "moemail":
@@ -1447,12 +1470,19 @@ def release_email(dev_token, log_callback=None):
             log=log_callback,
         )
         provider_name = "MoeMail"
-    else:
+    elif provider == "duckmail":
         delete_once = lambda: delete_duckmail_account(
             str(dev_token),
             log_callback=log_callback,
         )
         provider_name = "DuckMail"
+    else:
+        delete_once = lambda: cloudflare_delete_temp_address(
+            get_cloudflare_api_base(),
+            str(dev_token),
+            log_callback=log_callback,
+        )
+        provider_name = "Cloudflare"
 
     retries = max(1, min(3, int(config.get("mail_cleanup_retries", 2) or 2)))
     for attempt in range(1, retries + 1):
@@ -1534,22 +1564,27 @@ def get_oai_code(
 
 
 def extract_verification_code(text, subject=""):
-    if subject:
-        match = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI", subject, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    match = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", text, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    patterns = [
+    sources = [str(subject or ""), str(text or "")]
+    structured_patterns = [
+        r"(?:confirmation|verification)\s+code(?:\s+is)?\s*[:：]?\s*([A-Z0-9]{3}-[A-Z0-9]{3})\b",
+        r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b\s+(?:SpaceXAI|xAI)\b",
+    ]
+    for source in sources:
+        for pattern in structured_patterns:
+            match = re.search(pattern, source, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+
+    numeric_patterns = [
         r"verification\s+code[:\s]+(\d{4,8})",
         r"your\s+code[:\s]+(\d{4,8})",
         r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})",
     ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1)
+    for source in sources:
+        for pattern in numeric_patterns:
+            match = re.search(pattern, source, re.IGNORECASE)
+            if match:
+                return match.group(1)
     return None
 
 
@@ -1600,7 +1635,7 @@ def duckmail_get_oai_code(
             code = extract_verification_code(combined, subject)
             if code:
                 if log_callback:
-                    log_callback(f"[*] 从邮件中提取到验证码: {code}")
+                    log_callback("[*] 已从邮件中提取验证码")
                 return code
         sleep_with_cancel(poll_interval, cancel_callback)
     raise Exception(f"在 {timeout}s 内未收到验证码邮件")
@@ -1697,7 +1732,7 @@ def cloudflare_get_oai_code(
             code = extract_verification_code(combined, subject)
             if code:
                 if log_callback:
-                    log_callback(f"[*] Cloudflare 从邮件中提取到验证码: {code}")
+                    log_callback("[*] Cloudflare 已从邮件中提取验证码")
                 return code
             elif log_callback:
                 log_callback(f"[Debug] 邮件已解析但未提取到验证码 id={msg_id} attempt={seen_attempts[msg_id]}")
@@ -2461,7 +2496,7 @@ def fill_email_and_submit(
         if on_created is not None:
             on_created(created_email, created_token)
         if log_callback:
-            log_callback(f"[*] 已创建邮箱: {created_email}")
+            log_callback("[*] 已创建邮箱")
         return created_email, created_token
 
     def replace_rejected_duckmail(current_email, current_token):
@@ -2596,7 +2631,7 @@ return true;
         )
         if clicked:
             if log_callback:
-                log_callback(f"[*] 已填写邮箱并点击注册: {email}")
+                log_callback("[*] 已填写邮箱并点击注册")
             dump_state(page, "email-submitted")
             take_screenshot(page, "email-submitted")
             confirm_timeout = float(
@@ -2759,7 +2794,7 @@ return 'clicked';
 
         if clicked == "clicked" or clicked == "no-button":
             if log_callback:
-                log_callback(f"[*] 已填写验证码并提交: {code}")
+                log_callback("[*] 已填写验证码并提交")
             human_sleep(1.5, cancel_callback)
             return code
 
@@ -3435,7 +3470,7 @@ return 'submitted';
         if state == 'submitted':
             email_submitted = True
             if log_callback:
-                log_callback(f"[*] 已填写邮箱并提交: {email}")
+                log_callback("[*] 已填写邮箱并提交")
         elif state == 'not-ready':
             human_sleep(0.5, cancel_callback)
         elif state == 'btn-disabled':
@@ -3833,7 +3868,7 @@ class GrokRegisterGUI:
 【最后：快速自检】
 1) 先设置: 注册数量=1，并发线程=1
 2) 点开始后看日志是否出现：
-- 已创建邮箱: xxx@你的域名
+- 已创建邮箱
 - Cloudflare/CloudMail 本轮邮件数量: ...
 - 从邮件中提取到验证码: ...
 3) 若第一步就失败：
@@ -3980,7 +4015,7 @@ class GrokRegisterGUI:
             open_signup_page(log_callback=logf, cancel_callback=self.should_stop)
             logf("[*] 2. 创建邮箱并提交")
             email, dev_token = fill_email_and_submit(log_callback=logf, cancel_callback=self.should_stop)
-            logf(f"[*] 邮箱: {email}")
+            logf("[*] 邮箱已提交")
             try:
                 secure_append(
                     os.path.join(DATA_DIR, "mail_credentials.txt"),
@@ -4004,7 +4039,7 @@ class GrokRegisterGUI:
                 raise
         if not mail_ok:
             raise Exception("验证码阶段失败，已达到最大重试次数")
-        logf(f"[*] 验证码: {code}")
+        logf("[*] 验证码已提交")
         logf("[*] 4. 填写资料")
         profile = fill_profile_and_submit(log_callback=logf, cancel_callback=self.should_stop)
         logf(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
@@ -4019,7 +4054,7 @@ class GrokRegisterGUI:
             except Exception as file_exc:
                 logf(f"[Debug] 保存账号文件失败: {file_exc}")
         add_token_to_grok2api_pools(sso, email=email, log_callback=logf)
-        logf(f"[+] 注册成功: {email}")
+        logf("[+] 注册成功，凭据已写入账本")
 
     def _worker_loop(self, worker_id, total, task_queue):
         prefix = f"[T{worker_id}]"

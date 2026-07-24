@@ -1,0 +1,19 @@
+{
+  "name": "grok-mail-kagari-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/index.js",
+    "test": "node --test",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 migrations apply grok-mail-kagari --local",
+    "migrate:remote": "wrangler d1 migrations apply grok-mail-kagari --remote"
+  },
+  "dependencies": {
+    "postal-mime": "2.7.5"
+  },
+  "devDependencies": {
+    "wrangler": "4.114.0"
+  }
+}

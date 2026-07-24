@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "grok-mail-kagari",
+  "account_id": "913b246cfcc5f85679f837ea5962a6ce",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-24",
+  "workers_dev": false,
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "grok-mail-kagari",
+      "database_id": "903ebaef-a0ad-4f4f-bbdb-59e0125d64d2",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "MAIL_DOMAIN": "kagari.app",
+    "MAILBOX_TTL_SECONDS": "3600",
+    "MAX_ACTIVE_MAILBOXES": "25",
+    "MAX_MESSAGE_BYTES": "1048576"
+  }
+}

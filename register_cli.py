@@ -260,7 +260,7 @@ def _register_one_browser(
                 cancel_callback=cancel,
                 on_created=_remember_mailbox,
             )
-            log(worker_id, f"邮箱: {email}")
+            log(worker_id, "邮箱已提交")
             log(worker_id, "3. 拉取验证码")
             code = reg.fill_code_and_submit(
                 email,
@@ -268,7 +268,7 @@ def _register_one_browser(
                 log_callback=lambda m: log(worker_id, m),
                 cancel_callback=cancel,
             )
-            log(worker_id, f"验证码: {code}")
+            log(worker_id, "验证码已提交")
             _release_mailbox("code-received")
             break
         except reg.RegistrationCancelled:
@@ -312,7 +312,7 @@ def _register_one_browser(
         password = profile.get("password", "") or ""
         line = f"{email}----{password}----{sso}\n"
         reg.secure_append(accounts_file, line, lock=_accounts_file_lock)
-        log(worker_id, f"+ 注册成功: {email}")
+        log(worker_id, "+ 注册成功，凭据已写入账本")
         reg.mark_used(email, password)
         _release_mailbox("registration-complete")
 
@@ -375,7 +375,7 @@ def _register_one_browser(
                 log(worker_id, f"[cpa] mint 队列背压 qsize={mint_queue.qsize()}≥{qmax}，等待...")
                 time.sleep(1.0)
             mint_queue.put(job)
-            log(worker_id, f"[cpa] enqueued mint for {email} (queue≈{mint_queue.qsize()})")
+            log(worker_id, f"[cpa] enqueued mint (queue≈{mint_queue.qsize()})")
         else:
             log(worker_id, "[cpa] mint skipped (no queue / inline)")
 
@@ -484,7 +484,7 @@ def _finalize_fast_registration(
         lock=_accounts_file_lock,
     )
     reg.mark_used(email, password)
-    log(worker_id, f"+ 快速协议注册成功: {email}")
+    log(worker_id, "+ 快速协议注册成功，凭据已写入账本")
 
     try:
         reg.add_token_to_grok2api_pools(
@@ -515,7 +515,7 @@ def _finalize_fast_registration(
             log(worker_id, f"[cpa] mint 队列背压 qsize={mint_queue.qsize()}≥{qmax}，等待...")
             time.sleep(1.0)
         mint_queue.put(job)
-        log(worker_id, f"[cpa] enqueued mint for {email} (queue≈{mint_queue.qsize()})")
+        log(worker_id, f"[cpa] enqueued mint (queue≈{mint_queue.qsize()})")
     else:
         log(worker_id, "[cpa] mint skipped (no queue / inline)")
 
@@ -633,7 +633,7 @@ def _run_mint_job(
         return {"ok": False, "error": "missing email/password", "email": email}
     if not config.get("cpa_export_enabled", True):
         _inc("mint_skip")
-        log(worker_id, f"[cpa] export disabled, skip {email}")
+        log(worker_id, "[cpa] export disabled, skip")
         return {"ok": False, "skipped": True, "email": email}
     try:
         import cpa_export
