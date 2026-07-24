@@ -2001,6 +2001,59 @@ return {emailVisible: !!email, advanced: !!code || !!profile};
     return False
 
 
+def _email_submission_diagnostics(page):
+    """Return bounded, non-credential page state for a failed email submission."""
+    try:
+        return page.run_js(
+            r"""
+function visible(node) {
+  if (!node) return false;
+  const s = getComputedStyle(node), r = node.getBoundingClientRect();
+  return s.display !== 'none' && s.visibility !== 'hidden' &&
+    s.opacity !== '0' && r.width > 0 && r.height > 0;
+}
+const email = [...document.querySelectorAll('input[type="email"], input[name="email"]')].find(visible);
+const submit = [...document.querySelectorAll('button[type="submit"], button')].find(node => {
+  if (!visible(node)) return false;
+  const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return text === 'sign up' || text.includes('continue') || text.includes('next') || text.includes('注册');
+});
+const challengeFields = [...document.querySelectorAll(
+  'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], input[name="g-recaptcha-response"], textarea[name="g-recaptcha-response"]'
+)];
+const errorTexts = [...document.querySelectorAll(
+  '[role="alert"], [aria-live="assertive"], [data-testid*="error" i], [class*="error" i]'
+)].filter(visible).map(node =>
+  (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160)
+).filter(Boolean).slice(0, 5);
+const bodyText = (document.body?.innerText || '').toLowerCase();
+return {
+  path: location.pathname,
+  emailVisible: !!email,
+  emailValid: email ? email.checkValidity() : null,
+  validationMessage: email ? String(email.validationMessage || '').slice(0, 120) : '',
+  submitVisible: !!submit,
+  submitDisabled: submit ? !!submit.disabled || submit.getAttribute('aria-disabled') === 'true' : null,
+  turnstileFrames: document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]').length,
+  challengeFields: challengeFields.length,
+  challengeTokenLength: challengeFields.reduce((n, field) => Math.max(n, (field.value || '').length), 0),
+  humanVerificationText: bodyText.includes('verify you are human') || bodyText.includes('verifying you are human') || bodyText.includes('人机验证'),
+  errors: errorTexts
+};
+            """
+        ) or {}
+    except Exception as exc:
+        return {"diagnosticError": type(exc).__name__}
+
+
+def _email_submit_timeout_error(page):
+    diagnostics = _email_submission_diagnostics(page)
+    return Exception(
+        "提交邮箱后页面未在限定时间内进入下一步; diagnostic="
+        + json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
 def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=None):
     page = _get_page()
     deadline = time.time() + timeout
@@ -2167,7 +2220,7 @@ def fill_email_and_submit(
                 cancel_callback=cancel_callback,
             ):
                 return email, dev_token
-            raise Exception("提交邮箱后页面未在限定时间内进入下一步")
+            raise _email_submit_timeout_error(page)
 
         filled = page.run_js(
             """
@@ -2263,7 +2316,7 @@ return true;
                 cancel_callback=cancel_callback,
             ):
                 return email, dev_token
-            raise Exception("提交邮箱后页面未在限定时间内进入下一步")
+            raise _email_submit_timeout_error(page)
         human_sleep(0.5, cancel_callback)
     raise Exception("未找到邮箱输入框或注册按钮")
 

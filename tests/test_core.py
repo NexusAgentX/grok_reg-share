@@ -128,6 +128,18 @@ class CoreBehaviorTestCase(unittest.TestCase):
             result = reg.fill_email_and_submit(timeout=1)
         self.assertEqual(result, ("temporary@duck.test", "mailbox-token"))
 
+    def test_email_submit_timeout_diagnostics_omit_email_value(self):
+        page = unittest.mock.Mock()
+        page.run_js.return_value = {
+            "path": "/sign-up",
+            "emailVisible": True,
+            "emailValid": True,
+            "errors": ["Something went wrong"],
+        }
+        message = str(reg._email_submit_timeout_error(page))
+        self.assertIn("Something went wrong", message)
+        self.assertNotIn("temporary@duck.test", message)
+
     def test_native_email_submit_uses_browser_input_and_click(self):
         email = "temporary@duck.test"
         email_input = unittest.mock.Mock()
