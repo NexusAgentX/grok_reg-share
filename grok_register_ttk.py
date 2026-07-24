@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     "email_provider": "cloudmail",
     "duckmail_api_key": "",
     "duckmail_expiry_seconds": 86400,
-    "duckmail_excluded_domains": "duckmail.sbs",
+    "duckmail_excluded_domains": "duckmail.sbs,baldur.edu.kg",
     "moemail_api_base": "https://moemail.app",
     "moemail_api_key": "",
     "moemail_cookie": "",
@@ -1130,6 +1130,8 @@ def pick_domain(api_key=None, excluded_domains=None):
             domain = str(item.get("domain") or "").strip()
             if domain and domain.lower() not in excluded:
                 return domain
+    if public:
+        raise Exception("DuckMail 当前所有公共域名均已被 xAI 拒绝或禁用")
     raise Exception("DuckMail 没有未被排除的已验证域名可用")
 
 

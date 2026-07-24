@@ -230,15 +230,17 @@ class CoreBehaviorTestCase(unittest.TestCase):
         previous = dict(reg.config)
         reg.config = {"duckmail_excluded_domains": "duckmail.sbs"}
         try:
-            with patch.object(
-                reg,
-                "get_domains",
-                return_value=[
-                    {"domain": "duckmail.sbs", "isVerified": True, "ownerId": None},
-                    {"domain": "baldur.edu.kg", "isVerified": True, "ownerId": None},
-                ],
-            ):
+            domains = [
+                {"domain": "duckmail.sbs", "isVerified": True, "ownerId": None},
+                {"domain": "baldur.edu.kg", "isVerified": True, "ownerId": None},
+            ]
+            with patch.object(reg, "get_domains", return_value=domains):
                 self.assertEqual(reg.pick_domain(), "baldur.edu.kg")
+
+            reg.config["duckmail_excluded_domains"] = "duckmail.sbs,baldur.edu.kg"
+            with patch.object(reg, "get_domains", return_value=domains):
+                with self.assertRaisesRegex(Exception, "当前所有公共域名均已被 xAI 拒绝"):
+                    reg.pick_domain()
         finally:
             reg.config = previous
 

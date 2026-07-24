@@ -137,11 +137,11 @@ cp config.example.json config.json
   "email_provider": "duckmail",
   "duckmail_api_key": "",
   "duckmail_expiry_seconds": 86400,
-  "duckmail_excluded_domains": "duckmail.sbs"
+  "duckmail_excluded_domains": "duckmail.sbs,baldur.edu.kg"
 }
 ```
 
-xAI 已确认拒绝 DuckMail 公共域名 `duckmail.sbs`，示例配置默认跳过它。若页面明确返回域名拒绝，浏览器流程会删除本次邮箱并在同一任务内自动尝试下一个未排除的 DuckMail 公共域名；所有域名都被拒绝后才结束任务。
+xAI 已确认拒绝 DuckMail 当前两个公共域名 `duckmail.sbs` 和 `baldur.edu.kg`，因此 DuckMail 暂不可用于注册，示例配置默认禁用二者。若 DuckMail 以后增加新公共域名，浏览器流程仍会在页面明确返回域名拒绝后删除本次邮箱并自动尝试下一个未排除域名。
 
 Web 控制台可在任务面板逐次选择模式。CLI 可用 `--registration-mode browser|fast|auto` 覆盖配置：
 
