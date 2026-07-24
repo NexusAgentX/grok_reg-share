@@ -32,6 +32,19 @@ class CoreBehaviorTestCase(unittest.TestCase):
     def setUp(self):
         cli.reset_stats()
 
+    def test_user_visible_source_has_no_known_mojibake_fragments(self):
+        source = Path(reg.__file__).read_text(encoding="utf-8")
+        for fragment in (
+            "鑾峰",
+            "澶辫触",
+            "閭欢",
+            "宸插垱",
+            "鐢ㄦ埛",
+            "寮傚父",
+            "鎴愬姛",
+        ):
+            self.assertNotIn(fragment, source)
+
     def test_secure_append_is_thread_safe_and_mode_0600(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "accounts.txt"
