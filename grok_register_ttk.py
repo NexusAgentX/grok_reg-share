@@ -2139,7 +2139,8 @@ const submitButton = buttons.find((node) => {
     );
 });
 if (!submitButton || submitButton.disabled) return false;
-submitButton.click();
+// Return before React navigation can destroy this execution context.
+window.setTimeout(() => submitButton.click(), 0);
 return true;
             """
         )

@@ -647,5 +647,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("GROK_REG_WEB_PORT", "5000"))
     print(f"[*] Grok Register Web UI: http://{host}:{port}")
     print(f"[*] Runtime data: {DATA_DIR}")
-    print(f"[*] Web login token: {WEB_TOKEN}")
+    print("[*] Web login token: configured")
     app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
