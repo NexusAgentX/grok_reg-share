@@ -1,0 +1,230 @@
+# Experimental: try browser register + OIDC mint on GitHub-hosted runners.
+# Manual only. Do NOT enable schedule until pass-rate is proven.
+name: runner-register-mint
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra:
+        description: "How many new accounts to attempt"
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+      registration_mode:
+        description: "Registration backend"
+        required: true
+        default: "browser"
+        type: choice
+        options:
+          - browser
+          - auto
+      note:
+        description: "Optional note for this run (no secrets)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-register-mint
+  cancel-in-progress: false
+
+jobs:
+  register-mint:
+    name: hosted-runner-batch
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk + basic tools
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq ca-certificates
+          df -h
+
+      - name: Build image
+        run: |
+          set -eux
+          docker build -t grok-reg:runner .
+
+      - name: Prepare data dir + config from secrets
+        env:
+          CLOUDFLARE_API_BASE: ${{ secrets.CLOUDFLARE_API_BASE }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
+          RUNNER_PROXY: ${{ secrets.RUNNER_PROXY }}
+          RUNNER_CPA_PROXY: ${{ secrets.RUNNER_CPA_PROXY }}
+        run: |
+          set -eux
+          mkdir -p /tmp/grok-data/cpa_auths /tmp/grok-data/diagnostics /tmp/grok-outbox
+          chmod 700 /tmp/grok-data
+
+          if [ -z "${CLOUDFLARE_API_BASE:-}" ] || [ -z "${CLOUDFLARE_API_KEY:-}" ]; then
+            echo "Missing CLOUDFLARE_API_BASE / CLOUDFLARE_API_KEY secrets" >&2
+            exit 1
+          fi
+
+          # Hosted runners cannot use Tower host.docker.internal proxy.
+          # Optional residential/datacenter proxy via secrets.
+          export PROXY_VALUE="${RUNNER_PROXY:-}"
+          export CPA_PROXY_VALUE="${RUNNER_CPA_PROXY:-${RUNNER_PROXY:-}}"
+
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          cfg = {
+              "email_provider": "cloudflare",
+              "fast_mail_provider": "cloudflare",
+              "cloudflare_api_base": os.environ["CLOUDFLARE_API_BASE"].rstrip("/"),
+              "cloudflare_api_key": os.environ["CLOUDFLARE_API_KEY"],
+              "cloudflare_auth_mode": "bearer",
+              "cloudflare_path_domains": "/domains",
+              "cloudflare_path_accounts": "/accounts",
+              "cloudflare_path_token": "/token",
+              "cloudflare_path_messages": "/messages",
+              "registration_mode": "browser",
+              "proxy": os.environ.get("PROXY_VALUE", ""),
+              "cpa_proxy": os.environ.get("CPA_PROXY_VALUE", ""),
+              "allow_direct_fallback": True,
+              "cpa_export_enabled": True,
+              "cpa_auth_dir": "./cpa_auths",
+              "cpa_copy_to_hotload": False,
+              "cpa_hotload_dir": "",
+              "cpa_outbox_dir": "/outbox",
+              "cpa_account_proxy_urls": "",
+              "cpa_account_proxy_url": "",
+              "cpa_base_url": "https://cli-chat-proxy.grok.com/v1",
+              "cpa_headless": False,
+              "cpa_force_standalone": True,
+              "cpa_mint_browser_reuse": False,
+              "cpa_mint_browser_recycle_every": 1,
+              "cpa_mint_cookie_inject": True,
+              "cpa_mint_timeout_sec": 300,
+              "cpa_probe_after_write": True,
+              "cpa_probe_chat": False,
+              "cpa_mint_required": False,
+              "turnstile_retry_limit": 2,
+              "turnstile_stuck_timeout": 120,
+              "mail_timeout": 150,
+              "chromium_no_sandbox": True,
+          }
+          Path("/tmp/grok-data/config.json").write_text(
+              json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          Path("/tmp/grok-data/accounts_cli.txt").write_text("", encoding="utf-8")
+          print("config written")
+          print("proxy_set", bool(cfg["proxy"]))
+          print("cpa_proxy_set", bool(cfg["cpa_proxy"]))
+          PY
+
+      - name: Runner egress smoke (no secrets)
+        run: |
+          set -eux
+          echo "note=${{ inputs.note }}"
+          curl -sS -o /tmp/ip.json -w "ip_http=%{http_code}\n" https://api.ipify.org?format=json || true
+          cat /tmp/ip.json || true
+          curl -sS -o /dev/null -w "xai_http=%{http_code}\n" https://accounts.x.ai/ || true
+          curl -sS -o /dev/null -w "grok_http=%{http_code}\n" https://grok.com/ || true
+
+      - name: Run register + mint batch
+        id: batch
+        env:
+          EXTRA: ${{ inputs.extra }}
+          MODE: ${{ inputs.registration_mode }}
+        run: |
+          set -eux
+          extra="${EXTRA:-1}"
+          mode="${MODE:-browser}"
+          # One-shot CLI via image entrypoint (starts Xvfb automatically).
+          # no-browser-reuse: fresher fingerprint per account on the same runner.
+          set +e
+          docker run --rm \
+            --shm-size=1g \
+            --security-opt seccomp=unconfined \
+            -e GROK_REG_DATA_DIR=/data \
+            -e TZ=Asia/Shanghai \
+            -v /tmp/grok-data:/data \
+            -v /tmp/grok-outbox:/outbox \
+            grok-reg:runner \
+            python -u register_cli.py \
+              --extra "$extra" \
+              --threads 1 \
+              --registration-mode "$mode" \
+              --mint-workers 1 \
+              --no-browser-reuse \
+            | tee /tmp/grok-data/runner-batch.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "batch_rc=$rc" | tee -a /tmp/grok-data/runner-batch.log
+          exit 0
+
+      - name: Summarize outputs
+        if: always()
+        run: |
+          set -eux
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = Path("/tmp/grok-data")
+          auths = list((data / "cpa_auths").glob("xai-*.json"))
+          ok = []
+          for p in auths:
+              try:
+                  d = json.loads(p.read_text())
+              except Exception:
+                  continue
+              if d.get("access_token") and d.get("refresh_token"):
+                  ok.append(p.name)
+          accounts = [l for l in (data / "accounts_cli.txt").read_text().splitlines() if l.strip()] if (data / "accounts_cli.txt").exists() else []
+          print(f"accounts_lines={len(accounts)}")
+          print(f"cpa_files={len(auths)}")
+          print(f"oidc_ok={len(ok)}")
+          for n in ok:
+              print(f"oidc_file={n}")
+          log = data / "runner-batch.log"
+          if log.exists():
+              text = log.read_text(errors="replace")
+              for line in text.splitlines():
+                  if "=== 完成" in line or "invalid_grant" in line or "Turnstile" in line or "注册成功" in line:
+                      print(f"log:{line[:240]}")
+          # redact config before artifact
+          cfg_path = data / "config.json"
+          if cfg_path.exists():
+              cfg = json.loads(cfg_path.read_text())
+              for k in list(cfg):
+                  if any(s in k.lower() for s in ("key", "token", "password", "secret", "cookie")):
+                      if cfg.get(k):
+                          cfg[k] = "***REDACTED***"
+              (data / "config.redacted.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+          Path("/tmp/summary.txt").write_text(
+              f"oidc_ok={len(ok)}\naccounts={len(accounts)}\ncpa_files={len(auths)}\n",
+              encoding="utf-8",
+          )
+          PY
+          cat /tmp/summary.txt
+          ls -la /tmp/grok-data/cpa_auths || true
+          ls -la /tmp/grok-data/diagnostics 2>/dev/null | head || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-register-mint-${{ github.run_id }}
+          path: |
+            /tmp/summary.txt
+            /tmp/grok-data/runner-batch.log
+            /tmp/grok-data/config.redacted.json
+            /tmp/grok-data/accounts_cli.txt
+            /tmp/grok-data/cpa_auths/
+            /tmp/grok-data/diagnostics/
+            /tmp/grok-outbox/
+          if-no-files-found: warn
+          retention-days: 7
