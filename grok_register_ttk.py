@@ -162,6 +162,7 @@ def configure_perf(**kwargs):
 
 
 _SCREENSHOT_DIR = os.path.join(DATA_DIR, "screenshots")
+_DIAG_DIR = os.path.join(DATA_DIR, "diagnostics")
 
 
 def dump_state(page, tag: str = ""):
@@ -189,10 +190,10 @@ def dump_state(page, tag: str = ""):
         print(f"  [state:{tag}] dump_state err: {e}")
 
 
-def take_screenshot(page, tag: str = ""):
+def take_screenshot(page, tag: str = "", *, force: bool = False):
     """捕获当前页面截图并保存到 screenshots/ 目录。"""
-    if PERF_FLAGS.get("skip_debug_io"):
-        return
+    if PERF_FLAGS.get("skip_debug_io") and not force:
+        return None
     try:
         os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
         ts = datetime.datetime.now().strftime("%H%M%S")
@@ -200,8 +201,265 @@ def take_screenshot(page, tag: str = ""):
         page.get_screenshot(path=path)
         os.chmod(path, 0o600)
         print(f"  [screenshot] saved: {path}")
+        return path
     except Exception as e:
         print(f"  [screenshot] err: {e}")
+        return None
+
+
+def _read_turnstile_token(page) -> str:
+    try:
+        token = page.run_js(
+            r"""
+try {
+  const byInput = String((document.querySelector('input[name="cf-turnstile-response"]') || {}).value || '').trim();
+  if (byInput) return byInput;
+  if (window.turnstile && typeof turnstile.getResponse === 'function') {
+    const byApi = String(turnstile.getResponse() || '').trim();
+    if (byApi) return byApi;
+  }
+  // some embeds stash response on widget host
+  const host = document.querySelector('[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+  return String((host && host.value) || '').trim();
+} catch (e) { return ''; }
+            """
+        )
+        return str(token or "").strip()
+    except Exception:
+        return ""
+
+
+def _turnstile_diag_snapshot(page) -> dict:
+    out = {
+        "url": "",
+        "title": "",
+        "token_len": 0,
+        "has_input": False,
+        "iframe_count": 0,
+        "iframes": [],
+        "text": "",
+        "has_password": False,
+        "has_given": False,
+    }
+    try:
+        out["url"] = str(getattr(page, "url", "") or "")
+    except Exception as exc:
+        out["url_error"] = str(exc)
+    try:
+        # Prefer delimited string: object returns from run_js can become None on this SPA.
+        raw = page.run_js(
+            r"""
+(() => {
+  const input = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]');
+  const ifr = [...document.querySelectorAll('iframe')].slice(0, 6).map((f) => {
+    const r = f.getBoundingClientRect();
+    return [String(f.src||'').slice(0,100), String(f.title||'').slice(0,40), Math.round(r.width||0), Math.round(r.height||0)].join(':');
+  });
+  const text = String((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 220);
+  return [
+    String(location.href || ''),
+    String(document.title || ''),
+    input ? String(input.value || '').trim().length : 0,
+    input ? 1 : 0,
+    document.querySelectorAll('iframe').length,
+    document.querySelector('input[type="password"]') ? 1 : 0,
+    document.querySelector('input[name="givenName"],input[autocomplete="given-name"],input[data-testid="givenName"]') ? 1 : 0,
+    ifr.join('|'),
+    text
+  ].join('\n');
+})()
+            """
+        )
+        if isinstance(raw, dict):
+            out["url"] = str(raw.get("href") or out.get("url") or "")
+            out["title"] = str(raw.get("title") or "")
+            out["token_len"] = int(raw.get("tokenLen") or 0)
+            out["has_input"] = bool(raw.get("hasInput"))
+            out["iframe_count"] = int(raw.get("iframeCount") or 0)
+            out["iframes"] = raw.get("iframes") or []
+            out["text"] = str(raw.get("text") or "")
+            out["has_password"] = bool(raw.get("hasPassword"))
+            out["has_given"] = bool(raw.get("hasGiven"))
+        else:
+            text = str(raw or "")
+            parts = text.split("\n")
+            if len(parts) >= 7:
+                out["url"] = parts[0] or out.get("url") or ""
+                out["title"] = parts[1]
+                try:
+                    out["token_len"] = int(parts[2] or 0)
+                except Exception:
+                    out["token_len"] = len(_read_turnstile_token(page))
+                out["has_input"] = parts[3] == "1"
+                try:
+                    out["iframe_count"] = int(parts[4] or 0)
+                except Exception:
+                    out["iframe_count"] = 0
+                out["has_password"] = parts[5] == "1"
+                out["has_given"] = parts[6] == "1"
+                out["iframes"] = [p for p in (parts[7].split("|") if len(parts) > 7 and parts[7] else []) if p]
+                out["text"] = parts[8] if len(parts) > 8 else ""
+            else:
+                out["raw"] = text[:500]
+                out["token_len"] = len(_read_turnstile_token(page))
+    except Exception as exc:
+        out["js_error"] = str(exc)
+        out["token_len"] = len(_read_turnstile_token(page))
+    return out
+
+
+def capture_turnstile_diag(page, tag: str = "turnstile", log_callback=None) -> dict:
+    """Always-on Turnstile diagnostics: JSON + screenshot under diagnostics/."""
+    os.makedirs(_DIAG_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = f"{ts}-{tag}-{secrets.token_hex(3)}"
+    info = _turnstile_diag_snapshot(page)
+    info["tag"] = tag
+    info["ts"] = ts
+    json_path = os.path.join(_DIAG_DIR, f"{base}.json")
+    png_path = os.path.join(_DIAG_DIR, f"{base}.png")
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=2)
+        os.chmod(json_path, 0o600)
+        info["json_path"] = json_path
+    except Exception as exc:
+        info["json_error"] = str(exc)
+    try:
+        page.get_screenshot(path=png_path)
+        os.chmod(png_path, 0o600)
+        info["screenshot_path"] = png_path
+    except Exception as exc:
+        info["screenshot_error"] = str(exc)
+    msg = (
+        f"[diag] turnstile tag={tag} token_len={info.get('token_len')} "
+        f"input={info.get('has_input')} iframes={info.get('iframe_count')} "
+        f"url={str(info.get('url') or '')[:80]}"
+    )
+    if log_callback:
+        log_callback(msg)
+    else:
+        print(msg, flush=True)
+    return info
+
+
+def _click_turnstile_widget(page, log_callback=None) -> str:
+    """Try multiple click strategies; return which path worked."""
+    # 1) proven shadow-root path
+    try:
+        challenge_input = page.ele("@name=cf-turnstile-response", timeout=0.4)
+    except Exception:
+        challenge_input = None
+    if challenge_input:
+        try:
+            wrapper = challenge_input.parent()
+        except Exception:
+            wrapper = None
+        iframe = None
+        if wrapper is not None:
+            try:
+                iframe = wrapper.shadow_root.ele("tag:iframe")
+            except Exception:
+                iframe = None
+            if iframe is None:
+                try:
+                    iframe = wrapper.ele("tag:iframe", timeout=0.2)
+                except Exception:
+                    iframe = None
+        if iframe is not None:
+            try:
+                iframe.run_js(
+                    """
+window.dtp = 1;
+function getRandomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+let sx = getRandomInt(800, 1200);
+let sy = getRandomInt(400, 700);
+Object.defineProperty(MouseEvent.prototype, 'screenX', { value: sx });
+Object.defineProperty(MouseEvent.prototype, 'screenY', { value: sy });
+                    """
+                )
+            except Exception:
+                pass
+            try:
+                body = iframe.ele("tag:body", timeout=0.5)
+                btn = None
+                if body is not None:
+                    try:
+                        btn = body.shadow_root.ele("tag:input")
+                    except Exception:
+                        try:
+                            btn = body.ele("tag:input", timeout=0.2)
+                        except Exception:
+                            btn = None
+                if btn:
+                    btn.click()
+                    return "shadow-checkbox"
+            except Exception:
+                pass
+            try:
+                iframe.click()
+                return "iframe-click"
+            except Exception:
+                pass
+
+    # 2) CDP pointer on host rect (string bridge, object returns can be lost)
+    try:
+        raw = page.run_js(
+            r"""
+(() => {
+  function box(n){
+    if(!n) return '';
+    const r=n.getBoundingClientRect();
+    if(!r.width || !r.height) return '';
+    return [r.x,r.y,r.width,r.height].join(',');
+  }
+  const cands=[];
+  const input=document.querySelector('input[name="cf-turnstile-response"]');
+  if(input){ cands.push(input); if(input.parentElement) cands.push(input.parentElement); }
+  document.querySelectorAll('iframe[src*="turnstile"],iframe[src*="challenges.cloudflare"],div.cf-turnstile,[data-sitekey]').forEach(n=>cands.push(n));
+  for(const n of cands){ const s=box(n); if(s) return s; }
+  return '';
+})()
+            """
+        )
+        text = str(raw or "").strip()
+        if text and "," in text:
+            x, y, w, h = [float(p) for p in text.split(",")[:4]]
+            cx = x + min(max(w * 0.18, 16), 28)
+            cy = y + h / 2
+            for event_type in ("mouseMoved", "mousePressed", "mouseReleased"):
+                page.run_cdp(
+                    "Input.dispatchMouseEvent",
+                    type=event_type,
+                    x=cx,
+                    y=cy,
+                    button="left" if event_type != "mouseMoved" else "none",
+                    clickCount=1 if event_type != "mouseMoved" else 0,
+                )
+            return "cdp-rect"
+    except Exception:
+        pass
+
+    # 3) generic container click
+    try:
+        ok = page.run_js(
+            r"""
+const nodes = Array.from(document.querySelectorAll('iframe,div,span')).filter((n) => {
+  const txt = (n.className || '') + ' ' + (n.id || '') + ' ' + (n.getAttribute?.('src') || '');
+  return String(txt).toLowerCase().includes('turnstile') || String(n.getAttribute?.('src') || '').includes('challenges.cloudflare');
+});
+if (!nodes.length) return false;
+const n = nodes[0];
+try { n.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
+if (typeof n.click === 'function') { n.click(); return true; }
+return false;
+            """
+        )
+        if ok:
+            return "container-js"
+    except Exception:
+        pass
+    return ""
 
 
 # ── 全量 cookie 保存 ──
@@ -630,6 +888,65 @@ CHROMIUM_SLIM_FLAGS = [
 ]
 
 
+def _create_proxy_auth_extension(proxy: str) -> str | None:
+    """Chromium cannot put user:pass in --proxy-server; use a tiny MV3 extension."""
+    try:
+        from urllib.parse import unquote, urlparse
+
+        u = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+        if not u.username or not u.hostname:
+            return None
+        username = unquote(u.username)
+        password = unquote(u.password or "")
+        host = u.hostname
+        base = os.path.join(DATA_DIR, "browser-data")
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        extension_dir = os.path.join(
+            base, f"proxy-auth-{os.getpid()}-{time.time_ns()}"
+        )
+        os.makedirs(extension_dir, mode=0o700, exist_ok=True)
+        manifest = {
+            "manifest_version": 3,
+            "name": "Ephemeral Proxy Authentication",
+            "version": "1.0.0",
+            "permissions": ["webRequest", "webRequestAuthProvider"],
+            "host_permissions": ["<all_urls>"],
+            "background": {"service_worker": "background.js"},
+        }
+        worker = f"""
+const proxyHost = {json.dumps(host)};
+const credentials = {{
+  username: {json.dumps(username)},
+  password: {json.dumps(password)}
+}};
+chrome.webRequest.onAuthRequired.addListener(
+  (details, callback) => {{
+    const challenger = details.challenger || {{}};
+    if (!details.isProxy || (challenger.host && challenger.host !== proxyHost)) {{
+      callback({{}});
+      return;
+    }}
+    callback({{authCredentials: credentials}});
+  }},
+  {{urls: ["<all_urls>"]}},
+  ["asyncBlocking"]
+);
+""".strip()
+        man_path = os.path.join(extension_dir, "manifest.json")
+        js_path = os.path.join(extension_dir, "background.js")
+        with open(man_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        with open(js_path, "w", encoding="utf-8") as f:
+            f.write(worker)
+        os.chmod(man_path, 0o600)
+        os.chmod(js_path, 0o600)
+        os.chmod(extension_dir, 0o700)
+        return extension_dir
+    except Exception as e:
+        print(f"  [proxy] auth extension failed: {e}")
+        return None
+
+
 def create_browser_options():
     options = ChromiumOptions()
     options.auto_port()
@@ -654,6 +971,10 @@ def create_browser_options():
                 scheme = u.scheme or "http"
                 # Chromium --proxy-server cannot embed user:pass
                 options.set_argument(f"--proxy-server={scheme}://{host}:{port}")
+                auth_ext = _create_proxy_auth_extension(proxy)
+                if auth_ext:
+                    options.add_extension(auth_ext)
+                    print(f"  [proxy] auth extension loaded for host={host}")
         except Exception as e:
             print(f"  [proxy] set browser proxy failed: {e}")
     return options
@@ -2030,19 +2351,35 @@ def _native_fill_email_and_submit(
         submit_button = page.ele('css:button[type="submit"]', timeout=0.5)
         if not _native_element_is_usable(submit_button):
             return False
+        # Prefer a real click first. Some xAI builds swallow requestSubmit without
+        # advancing when the event is only scheduled via form.requestSubmit().
+        try:
+            submit_button.click()
+            clicked = True
+        except Exception:
+            clicked = False
         scheduled = submit_button.run_js(
             """
 const button = this;
 const form = button.form || button.closest('form');
 if (!form) return false;
-window.setTimeout(() => form.requestSubmit(button), 0);
-return true;
+try {
+  if (typeof form.requestSubmit === 'function') {
+    form.requestSubmit(button);
+  } else {
+    button.click();
+  }
+  return true;
+} catch (e) {
+  try { button.click(); return true; } catch (e2) { return false; }
+}
             """
         )
-        if not scheduled:
+        if not clicked and not scheduled:
             return False
         if log_callback:
-            log_callback("[*] 已通过原生输入和 requestSubmit 提交邮箱表单")
+            how = "click+requestSubmit" if clicked and scheduled else ("click" if clicked else "requestSubmit")
+            log_callback(f"[*] 已通过原生输入和 {how} 提交邮箱表单")
         return True
     except RegistrationCancelled:
         raise
@@ -2547,6 +2884,26 @@ def fill_email_and_submit(
                 email, dev_token = replace_rejected_duckmail(email, dev_token)
                 deadline = time.time() + timeout
                 continue
+            if log_callback:
+                log_callback("[*] 邮箱提交未跳转，重试一次原生提交")
+            _native_fill_email_and_submit(
+                page,
+                email,
+                log_callback=log_callback,
+                cancel_callback=cancel_callback,
+            )
+            submission_state = _wait_for_email_submission(
+                page,
+                min(confirm_timeout, 20.0),
+                cancel_callback=cancel_callback,
+            )
+            if submission_state is True:
+                _stop_email_submit_probe(page)
+                return email, dev_token
+            if submission_state == "domain-rejected":
+                email, dev_token = replace_rejected_duckmail(email, dev_token)
+                deadline = time.time() + timeout
+                continue
             raise _email_submit_timeout_error(page)
 
         filled = page.run_js(
@@ -2640,6 +2997,20 @@ return true;
             submission_state = _wait_for_email_submission(
                 page,
                 confirm_timeout,
+                cancel_callback=cancel_callback,
+            )
+            if submission_state is True:
+                _stop_email_submit_probe(page)
+                return email, dev_token
+            if submission_state == "domain-rejected":
+                email, dev_token = replace_rejected_duckmail(email, dev_token)
+                deadline = time.time() + timeout
+                continue
+            if log_callback:
+                log_callback("[*] 邮箱提交未跳转，回退路径再试一次")
+            submission_state = _wait_for_email_submission(
+                page,
+                min(confirm_timeout, 20.0),
                 cancel_callback=cancel_callback,
             )
             if submission_state is True:
@@ -2808,95 +3179,78 @@ def getTurnstileToken(log_callback=None, cancel_callback=None):
     if page is None:
         raise Exception("页面未就绪，无法执行 Turnstile")
 
+    # IMPORTANT: do NOT reset immediately. Managed/invisible widgets often already
+    # have a pending solve; reset throws away progress and tanks pass rate.
+    retry_limit = max(1, int(config.get("turnstile_retry_limit", 2) or 2))
+    stuck_timeout = max(8.0, float(config.get("turnstile_stuck_timeout", 120) or 120))
+    deadline = time.time() + stuck_timeout
+    # Reset only late in the wait, and at most retry_limit-1 times.
+    first_reset_at = time.time() + max(25.0, stuck_timeout * 0.55)
+    reset_interval = max(20.0, stuck_timeout / max(retry_limit, 1))
+    next_reset_at = first_reset_at
+    reset_count = 0
+    clicks = 0
+    last_diag_at = 0.0
+    started = time.time()
+
+    # gentle focus nudge helps some widgets render
     try:
         page.run_js(
-            "try { if (window.turnstile && typeof turnstile.reset === 'function') turnstile.reset(); } catch(e) {}"
+            "const p=document.querySelector('input[type=password],input[name=givenName],input[name=password]');"
+            " if(p){ try{p.focus();}catch(e){} }"
         )
     except Exception:
         pass
 
-    retry_limit = max(1, int(config.get("turnstile_retry_limit", 3) or 3))
-    stuck_timeout = max(5.0, float(config.get("turnstile_stuck_timeout", 150) or 150))
-    deadline = time.time() + stuck_timeout
-    reset_interval = stuck_timeout / retry_limit
-    next_reset_at = time.time() + reset_interval
-    reset_count = 0
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
-        if reset_count < retry_limit - 1 and time.time() >= next_reset_at:
+        token = _read_turnstile_token(page)
+        if len(token) >= 80:
+            if log_callback:
+                log_callback(f"[*] Turnstile 已通过，token长度={len(token)}")
+            return token
+
+        now = time.time()
+        # diagnostics every ~12s while stuck
+        if now - last_diag_at >= 12.0:
+            capture_turnstile_diag(
+                page,
+                tag=f"wait-token-c{clicks}-r{reset_count}",
+                log_callback=log_callback,
+            )
+            last_diag_at = now
+
+        # click more aggressively early; avoid reset early
+        if clicks < 24:
+            path = _click_turnstile_widget(page, log_callback=log_callback)
+            if path:
+                clicks += 1
+                if log_callback and clicks in (1, 4, 8, 12):
+                    log_callback(f"[*] Turnstile click path={path} clicks={clicks}")
+
+        # late reset only if still empty
+        if reset_count < retry_limit - 1 and now >= next_reset_at:
             try:
                 page.run_js(
                     "try { if (window.turnstile && typeof turnstile.reset === 'function') turnstile.reset(); } catch(e) {}"
                 )
                 reset_count += 1
-                next_reset_at += reset_interval
+                next_reset_at = now + reset_interval
                 if log_callback:
                     log_callback(f"[*] Turnstile 超时重置 {reset_count}/{retry_limit - 1}")
+                capture_turnstile_diag(
+                    page,
+                    tag=f"after-reset-{reset_count}",
+                    log_callback=log_callback,
+                )
             except Exception:
                 pass
-        try:
-            token = page.run_js(
-                """
-try {
-  const byInput = String((document.querySelector('input[name="cf-turnstile-response"]') || {}).value || '').trim();
-  if (byInput) return byInput;
-  if (window.turnstile && typeof turnstile.getResponse === 'function') {
-    return String(turnstile.getResponse() || '').trim();
-  }
-  return '';
-} catch(e) { return ''; }
-                """
-            )
-            token = str(token or "").strip()
-            if len(token) >= 80:
-                if log_callback:
-                    log_callback(f"[*] Turnstile 已通过，token长度={len(token)}")
-                return token
 
-            challenge_input = page.ele("@name=cf-turnstile-response")
-            if challenge_input:
-                wrapper = challenge_input.parent()
-                iframe = None
-                try:
-                    iframe = wrapper.shadow_root.ele("tag:iframe")
-                except Exception:
-                    iframe = None
-                if iframe:
-                    try:
-                        iframe.run_js(
-                            """
-window.dtp = 1;
-function getRandomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-let sx = getRandomInt(800, 1200);
-let sy = getRandomInt(400, 700);
-Object.defineProperty(MouseEvent.prototype, 'screenX', { value: sx });
-Object.defineProperty(MouseEvent.prototype, 'screenY', { value: sy });
-                            """
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        body_sr = iframe.ele("tag:body").shadow_root
-                        btn = body_sr.ele("tag:input")
-                        if btn:
-                            btn.click()
-                    except Exception:
-                        pass
-            else:
-                # 兜底：尝试触发页面上可见的 Turnstile 容器
-                page.run_js(
-                    """
-const nodes = Array.from(document.querySelectorAll('div,span,iframe')).filter((n) => {
-  const txt = (n.className || '') + ' ' + (n.id || '') + ' ' + (n.getAttribute?.('src') || '');
-  return String(txt).toLowerCase().includes('turnstile');
-});
-if (nodes.length && typeof nodes[0].click === 'function') nodes[0].click();
-                    """
-                )
-        except Exception:
-            pass
-        human_sleep(1, cancel_callback)
+        # small human-ish wait; a bit faster early, slower later
+        elapsed = now - started
+        human_sleep(0.55 if elapsed < 20 else 0.9, cancel_callback)
 
+    capture_turnstile_diag(page, tag="token-timeout", log_callback=log_callback)
     raise Exception("Turnstile 获取 token 失败")
 
 
@@ -2932,14 +3286,23 @@ def fill_profile_and_submit(timeout=None, log_callback=None, cancel_callback=Non
     dump_state(page, "profile-form")
     take_screenshot(page, "profile-form")
     given_name, family_name, password = build_profile()
-    # 预热 Turnstile：等 2 秒让 iframe 初始化，插件会自动点击 checkbox
+    # 预热 Turnstile：给 iframe 一点初始化时间，并主动点一次（不要 reset）
     if log_callback:
         log_callback("[*] 预热 Turnstile...")
-    human_sleep(2, cancel_callback)
+    human_sleep(1.2, cancel_callback)
+    try:
+        warm_path = _click_turnstile_widget(page, log_callback=log_callback)
+        if log_callback and warm_path:
+            log_callback(f"[*] Turnstile 预热点击 path={warm_path}")
+    except Exception as warm_exc:
+        if log_callback:
+            log_callback(f"[Debug] Turnstile 预热点击失败: {warm_exc}")
+    capture_turnstile_diag(page, tag="profile-warmup", log_callback=log_callback)
     deadline = time.time() + timeout
     form_filled_once = False
     wait_cf_since = None
     last_cf_retry_at = 0.0
+    last_cf_diag_at = 0.0
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -3011,8 +3374,9 @@ const submitBtn = buttons.find((node) => isProfileSubmitText(node.innerText || n
 
 // 必须等待 Cloudflare 校验通过后再提交
 const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
-const cfPresent = !!cfInput
-  || !!document.querySelector('iframe[src*="turnstile"], div.cf-turnstile, [data-sitekey], script[src*="turnstile"]');
+// Real widget/token field only; bare turnstile <script> must not block submit.
+const cfWidget = document.querySelector('iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"], div.cf-turnstile, [data-sitekey]');
+const cfPresent = !!cfInput || !!cfWidget;
 if (cfPresent) {
     const token = String((cfInput && cfInput.value) || '').trim();
     const solvedByToken = token.length >= 80;
@@ -3037,8 +3401,16 @@ return 'filled-no-submit';
                 now = time.time()
                 if wait_cf_since is None:
                     wait_cf_since = now
-                # 卡住后自动二次复用 Turnstile 组件
-                if now - wait_cf_since >= 12 and now - last_cf_retry_at >= 8:
+                if now - last_cf_diag_at >= 10:
+                    capture_turnstile_diag(page, tag="profile-wait-cf", log_callback=log_callback)
+                    last_cf_diag_at = now
+                # light click first; heavy getTurnstileToken only if still stuck
+                if now - last_cf_retry_at >= 3:
+                    path = _click_turnstile_widget(page, log_callback=log_callback)
+                    if path and log_callback:
+                        log_callback(f"[*] 资料页 Turnstile 轻点 path={path}")
+                    last_cf_retry_at = now
+                if now - wait_cf_since >= 10 and now - last_cf_retry_at >= 6:
                     if log_callback:
                         log_callback("[*] Cloudflare 验证卡住，开始二次复用 Turnstile...")
                     try:
@@ -3063,8 +3435,9 @@ return String(cfInput.value || '').trim().length;
                     except Exception as cf_exc:
                         if log_callback:
                             log_callback(f"[Debug] Turnstile 二次复用失败: {cf_exc}")
+                        capture_turnstile_diag(page, tag="profile-reuse-fail", log_callback=log_callback)
                     last_cf_retry_at = now
-                human_sleep(0.8, cancel_callback)
+                human_sleep(0.7, cancel_callback)
                 continue
 
             if filled in ("ready-to-submit", "filled-no-submit"):
@@ -3098,12 +3471,16 @@ function isProfileSubmitText(raw) {
 }
 
 const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
-const cfPresent = !!cfInput
-  || !!document.querySelector('iframe[src*="turnstile"], div.cf-turnstile, [data-sitekey], script[src*="turnstile"]');
+// Only treat real widget hosts/token fields as Cloudflare gates.
+// A bare turnstile <script> tag must NOT block submit.
+const cfWidget = document.querySelector('iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"], div.cf-turnstile, [data-sitekey]');
+const cfPresent = !!cfInput || !!cfWidget;
 if (cfPresent) {
     const token = String((cfInput && cfInput.value) || '').trim();
     const solvedByToken = token.length >= 80;
-    if (!solvedByToken) return 'wait-cloudflare:' + token.length;
+    // If only a script-backed managed widget exists with zero token field yet,
+    // still allow one submit attempt after fields are filled; otherwise wait.
+    if (!solvedByToken && (cfInput || cfWidget)) return 'wait-cloudflare:' + token.length;
 }
 
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button')).filter((node) => {
@@ -3142,7 +3519,15 @@ return 'submitted';
             now = time.time()
             if wait_cf_since is None:
                 wait_cf_since = now
-            if now - wait_cf_since >= 12 and now - last_cf_retry_at >= 8:
+            if now - last_cf_diag_at >= 10:
+                capture_turnstile_diag(page, tag="submit-wait-cf", log_callback=log_callback)
+                last_cf_diag_at = now
+            if now - last_cf_retry_at >= 3:
+                path = _click_turnstile_widget(page, log_callback=log_callback)
+                if path and log_callback:
+                    log_callback(f"[*] 提交前 Turnstile 轻点 path={path}")
+                last_cf_retry_at = now
+            if now - wait_cf_since >= 10 and now - last_cf_retry_at >= 6:
                 if log_callback:
                     log_callback("[*] 提交前仍卡住，自动再次复用 Turnstile...")
                 try:
@@ -3167,8 +3552,9 @@ return String(cfInput.value || '').trim().length;
                 except Exception as cf_exc:
                     if log_callback:
                         log_callback(f"[Debug] Turnstile 二次复用失败: {cf_exc}")
+                    capture_turnstile_diag(page, tag="submit-reuse-fail", log_callback=log_callback)
                 last_cf_retry_at = now
-            human_sleep(0.8, cancel_callback)
+            human_sleep(0.7, cancel_callback)
             continue
 
         if submit_state in ("submitted", "submitted-via-form"):

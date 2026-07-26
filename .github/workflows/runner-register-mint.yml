@@ -126,13 +126,31 @@ jobs:
           PY
 
       - name: Runner egress smoke (no secrets)
+        env:
+          RUNNER_PROXY: ${{ secrets.RUNNER_PROXY }}
         run: |
           set -eux
           echo "note=${{ inputs.note }}"
-          curl -sS -o /tmp/ip.json -w "ip_http=%{http_code}\n" https://api.ipify.org?format=json || true
-          cat /tmp/ip.json || true
-          curl -sS -o /dev/null -w "xai_http=%{http_code}\n" https://accounts.x.ai/ || true
-          curl -sS -o /dev/null -w "grok_http=%{http_code}\n" https://grok.com/ || true
+          curl -sS -o /tmp/ip-direct.json -w "direct_ip_http=%{http_code}\n" https://api.ipify.org?format=json || true
+          cat /tmp/ip-direct.json || true
+          curl -sS -o /dev/null -w "direct_xai_http=%{http_code}\n" https://accounts.x.ai/ || true
+
+          if [ -n "${RUNNER_PROXY:-}" ]; then
+            # Redact userinfo in logs
+            echo "proxy_configured=1"
+            set +e
+            curl -sS -m 25 -x "$RUNNER_PROXY" -o /tmp/ip-proxy.json -w "proxy_ip_http=%{http_code}\n" https://api.ipify.org?format=json
+            proxy_ip_rc=$?
+            set -e
+            echo "proxy_ip_rc=$proxy_ip_rc"
+            cat /tmp/ip-proxy.json || true
+            set +e
+            curl -sS -m 25 -x "$RUNNER_PROXY" -o /dev/null -w "proxy_xai_http=%{http_code}\n" https://accounts.x.ai/
+            echo "proxy_xai_rc=$?"
+            set -e
+          else
+            echo "proxy_configured=0"
+          fi
 
       - name: Run register + mint batch
         id: batch
